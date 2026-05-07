@@ -16,8 +16,8 @@ const PLACE_IDS = {
 
 const SCAN_INTERVAL = 15000;
 const PAGE_DELAY = 2000;
-const MAX_PAGES = 5;
-const MIN_PLAYERS = 4;
+const MAX_PAGES = 10;
+const MIN_PLAYERS = 1;
 const MAX_PLAYERS = 7;
 const MAX_POOL_SIZE = 1000;
 const POOL_TTL = 3 * 60 * 1000;
