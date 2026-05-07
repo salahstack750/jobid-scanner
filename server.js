@@ -1,270 +1,473 @@
-// ═══════════════════════════════════════════════════════════════
-//   🎯 RAILWAY JOBID SCANNER - BY SALAH
-// ═══════════════════════════════════════════════════════════════
+-- // =============================================
+-- // HOPPER HÍBRIDO FULL - Railway (Jobs) + Vultr (Report)
+-- // =============================================
 
-const express = require('express');
-const cors = require('cors');
-const app = express();
+local RAILWAY_URL = "https://jobid-scanner-production.up.railway.app"
+local VULTR_IP = "http://65.21.231.113:3000"
+local VULTR_API_KEY = "SALAH2026"
 
-const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.API_KEY || 'SALAH2026';
+local PLACE_ID = 109983668079237
+local MIN_REPORT_VALUE = 10000000
+local LIST_MIN_VALUE = 10000000
+local EMBED_COLOR = 0xFF69B4
+local EMBED_BRAND = "Flash Notifier - Dev BY SALAH ⚡"
 
-const PLACE_IDS = {
-    'rebirth0': 96342491571673,
-    'rebirth1': 109983668079237
-};
-
-const SCAN_INTERVAL = 15000;
-const PAGE_DELAY = 2000;
-const MAX_PAGES = 10;
-const MIN_PLAYERS = 6;
-const MAX_PLAYERS = 7;
-const MAX_POOL_SIZE = 1000;
-const POOL_TTL = 3 * 60 * 1000;
-
-const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-];
-
-function getRandomUA() {
-    return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+local WEBHOOKS = {
+	["10_100"] = "",
+	["100_400"] = "",
+	["400_1b"] = "",
+	["1b_plus"] = "",
 }
 
-const pools = {
-    rebirth0: [],
-    rebirth1: []
-};
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+local LocalPlayer = Players.LocalPlayer
 
-let stats = {
-    totalScans: 0,
-    totalErrors: 0,
-    totalRateLimits: 0,
-    lastScan: null
-};
+local requestFunc = syn and syn.request or http_request or http and http.request or request
 
-let scanInProgress = false;
+local lastAttemptedJobId = nil
+local failedJobIds = {}
 
-function log(msg, ...args) { console.log(`[${new Date().toISOString()}]`, msg, ...args); }
-function warn(msg, ...args) { console.warn(`[${new Date().toISOString()}]`, msg, ...args); }
-function error(msg, ...args) { console.error(`[${new Date().toISOString()}]`, msg, ...args); }
+if not requestFunc then
+	warn("[FATAL] No hay funcion HTTP disponible en este executor")
+	return
+end
 
-async function fetchRobloxServers(placeId, cursor = null, retryCount = 0) {
-    let url = `https://roblox-proxy.salahelarabi03.workers.dev/v1/games/${placeId}/servers/Public?sortOrder=Desc&excludeFullGames=true&limit=100`;
-    if (cursor) url += `&cursor=${cursor}`;
-    
-    try {
-        const response = await fetch(url, {
-            method: 'GET',
-            headers: {
-                'User-Agent': getRandomUA(),
-                'Accept': 'application/json',
-                'Accept-Language': 'en-US,en;q=0.9'
-            }
-        });
+-- // REDUCIR CALIDAD
+pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+pcall(function() setfpscap(4) end)
+pcall(function() game:GetService("ReplicatedFirst"):RemoveDefaultLoadingScreen() end)
 
-        if (response.status === 429) {
-            stats.totalRateLimits++;
-            warn(`[FETCH] Rate limited on placeId ${placeId}`);
-            if (retryCount < 3) {
-                await new Promise(r => setTimeout(r, 5000 * (retryCount + 1)));
-                return fetchRobloxServers(placeId, cursor, retryCount + 1);
-            }
-            return { servers: [], nextCursor: null };
-        }
+-- // ESPERAR CARGA
+repeat task.wait() until game:IsLoaded()
+repeat task.wait() until Players.LocalPlayer
+LocalPlayer = Players.LocalPlayer
+task.wait(5)
 
-        if (!response.ok) {
-            warn(`[FETCH] HTTP ${response.status} on placeId ${placeId}`);
-            return { servers: [], nextCursor: null };
-        }
+-- // ANTI IDLE
+do
+	local vu = game:GetService("VirtualUser")
+	local lastAntiIdle = 0
+	LocalPlayer.Idled:Connect(function()
+		local now = tick()
+		if now - lastAntiIdle < 60 then return end
+		lastAntiIdle = now
+		pcall(function()
+			vu:CaptureController()
+			vu:ClickButton2(Vector2.new())
+		end)
+	end)
+end
 
-        const data = await response.json();
-        return {
-            servers: data.data || [],
-            nextCursor: data.nextPageCursor || null
-        };
+-- // UTILIDADES
+local function formatNum(n)
+	if n >= 1e9 then return string.format("%.2fB", n / 1e9)
+	elseif n >= 1e6 then return string.format("%.2fM", n / 1e6)
+	elseif n >= 1e3 then return string.format("%.2fK", n / 1e3)
+	else return tostring(math.floor(n)) end
+end
 
-    } catch (err) {
-        error(`[FETCH] Error:`, err.message);
-        stats.totalErrors++;
-        if (retryCount < 3) {
-            await new Promise(r => setTimeout(r, 3000));
-            return fetchRobloxServers(placeId, cursor, retryCount + 1);
-        }
-        return { servers: [], nextCursor: null };
-    }
-}
+local function shouldScan(value) return value >= MIN_REPORT_VALUE end
 
-async function scanPlace(placeKey, placeId) {
-    log(`[SCAN] Scanning ${placeKey} (${placeId})...`);
+local function getTier(v)
+	if v >= 1e9 then return "1b"
+	elseif v >= 400e6 then return "400m"
+	elseif v >= 100e6 then return "100m"
+	elseif v >= 10e6 then return "10m" end
+	return "low"
+end
 
-    let allServers = [];
-    let cursor = null;
-    let pageCount = 0;
+-- ====================== ENDPOINTS ======================
+-- ✅ MODIFIE pour TON Railway
+local function getJobUrl()
+	return RAILWAY_URL .. "/jobs?placeId=" .. PLACE_ID .. "&key=" .. HttpService:UrlEncode(VULTR_API_KEY)
+end
 
-    do {
-        pageCount++;
-        const result = await fetchRobloxServers(placeId, cursor);
-        
-        if (result.servers.length > 0) {
-            allServers.push(...result.servers);
-            log(`[SCAN] ${placeKey} Page ${pageCount}: +${result.servers.length}`);
-        } else {
-            break;
-        }
-        
-        cursor = result.nextCursor;
-        if (pageCount >= MAX_PAGES) break;
-        if (cursor) await new Promise(r => setTimeout(r, PAGE_DELAY));
-        
-    } while (cursor);
+local function reportDataUrl()
+	return string.format("%s/report-data?key=%s", VULTR_IP, HttpService:UrlEncode(VULTR_API_KEY))
+end
+-- =======================================================
 
-    const validServers = allServers.filter(server => {
-        const playerCount = server.playing || 0;
-        const jobId = server.id;
-        return jobId && 
-               typeof jobId === 'string' &&
-               playerCount >= MIN_PLAYERS && 
-               playerCount <= MAX_PLAYERS &&
-               !pools[placeKey].some(job => job.jobId === jobId);
-    });
+-- // HOP - Railway
+local function hop()
+	while true do
+		print("[HOP] Solicitando nuevo servidor de Railway...")
+		local ok, response = pcall(function()
+			return requestFunc({
+				Url = getJobUrl(),
+				Method = "GET",
+				Headers = { ["username"] = LocalPlayer.Name },
+			})
+		end)
 
-    const newJobs = validServers.map(server => ({
-        jobId: server.id,
-        players: server.playing || 0,
-        maxPlayers: server.maxPlayers || 8,
-        addedAt: Date.now()
-    }));
+		local sc = ok and response and response.StatusCode
+		local body = ok and response and type(response.Body) == "string" and response.Body or ""
 
-    pools[placeKey].push(...newJobs);
+		if ok and sc == 200 and body and body ~= "" then
+			local targetJobId = body:match("^%s*([%w%-]+)%s*$")
+			if targetJobId and targetJobId ~= game.JobId and not failedJobIds[targetJobId] then
+				lastAttemptedJobId = targetJobId
+				print("[HOP] Teleport a JobID:", targetJobId:sub(1, 12), "...")
+				TeleportService:TeleportToPlaceInstance(PLACE_ID, targetJobId, LocalPlayer)
+				return
+			end
+		elseif sc == 503 then
+			print("[HOP] Pool sin servidores (503), reintentando...")
+		else
+			warn("[HOP] Error StatusCode=", tostring(sc))
+		end
+		task.wait(3)
+	end
+end
 
-    const now = Date.now();
-    pools[placeKey] = pools[placeKey].filter(job => (now - job.addedAt) < POOL_TTL);
-    
-    if (pools[placeKey].length > MAX_POOL_SIZE) {
-        pools[placeKey] = pools[placeKey].slice(-MAX_POOL_SIZE);
-    }
+TeleportService.TeleportInitFailed:Connect(function(player, result, errorMessage)
+	if player == LocalPlayer then
+		if lastAttemptedJobId then failedJobIds[lastAttemptedJobId] = true end
+		warn("[HOP] Teleport falló, reintentando...")
+		task.wait(1.5)
+		hop()
+	end
+end)
 
-    log(`[SCAN] ${placeKey} ✅ Added ${newJobs.length} | Pool: ${pools[placeKey].length}`);
-}
+-- // SAFE REQUIRE
+local function safeRequire(module)
+	local get_thread_identity = getthreadidentity or getidentity or function() return 2 end
+	local set_thread_identity = setthreadidentity or setidentity or function() end
+	local current = get_thread_identity()
+	set_thread_identity(2)
+	local success, result = pcall(require, module)
+	set_thread_identity(current)
+	return success and result or require(module)
+end
 
-async function scanAll() {
-    if (scanInProgress) return;
-    scanInProgress = true;
+local function waitForPath(parent, ...)
+	local current = parent
+	for _, name in ipairs({ ... }) do
+		current = current:WaitForChild(name, 10)
+		if not current then return nil end
+	end
+	return current
+end
 
-    try {
-        log(`\n[SCAN] ====== Scan #${stats.totalScans + 1} ======`);
-        
-        await scanPlace('rebirth1', PLACE_IDS.rebirth1);
-        await new Promise(r => setTimeout(r, 1000));
-        await scanPlace('rebirth0', PLACE_IDS.rebirth0);
+do
+	local Sync = require(game.ReplicatedStorage:WaitForChild("Packages"):WaitForChild("Synchronizer"))
+	local patched = 0
 
-        stats.totalScans++;
-        stats.lastScan = new Date().toISOString();
-        
-        log(`[SCAN] ✅ Complete | Pools: rebirth1=${pools.rebirth1.length}, rebirth0=${pools.rebirth0.length}\n`);
-    } catch (err) {
-        error(`[SCAN] Error:`, err.message);
-        stats.totalErrors++;
-    } finally {
-        scanInProgress = false;
-    }
-}
+	for name, fn in pairs(Sync) do
+		if typeof(fn) ~= "function" then continue end
+		if isexecutorclosure(fn) then continue end
 
-app.use(cors());
-app.use(express.json());
+		local ok, ups = pcall(debug.getupvalues, fn)
+		if not ok then continue end
 
-app.get('/', (req, res) => {
-    res.json({
-        status: 'online',
-        message: 'JobID Scanner API by SALAH',
-        endpoints: {
-            jobs: '/jobs?placeId=109983668079237&key=SALAH2026',
-            pool: '/pool?key=SALAH2026',
-            health: '/health'
-        },
-        pools: {
-            rebirth0: pools.rebirth0.length,
-            rebirth1: pools.rebirth1.length
-        }
-    });
-});
+		for idx, val in pairs(ups) do
+			if typeof(val) == "function" and not isexecutorclosure(val) then
+				local ok2, innerUps = pcall(debug.getupvalues, val)
+				if ok2 then
+					local hasBoolean = false
+					for _, v in pairs(innerUps) do
+						if typeof(v) == "boolean" then
+							hasBoolean = true
+							break
+						end
+					end
+					if hasBoolean then
+						debug.setupvalue(fn, idx, newcclosure(function() end))
+						patched += 1
+					end
+				end
+			end
+		end
+	end
+end
 
-app.get('/jobs', (req, res) => {
-    const apiKey = req.query.key;
-    const placeId = req.query.placeId;
-    const username = req.headers.username || 'Unknown';
+-- // CARGAR MÓDULOS
+local sync, animalsData, animalsShared, numberUtils
+for i = 1, 5 do
+	local ok, err = pcall(function()
+		sync = safeRequire(waitForPath(game.ReplicatedStorage, "Packages", "Synchronizer"))
+		animalsData = safeRequire(waitForPath(game.ReplicatedStorage, "Datas", "Animals"))
+		animalsShared = safeRequire(waitForPath(game.ReplicatedStorage, "Shared", "Animals"))
+		numberUtils = safeRequire(waitForPath(game.ReplicatedStorage, "Utils", "NumberUtils"))
+	end)
+	if ok and sync and animalsData and animalsShared and numberUtils then
+		print("[INIT] Módulos cargados correctamente")
+		break
+	end
+	task.wait(2)
+end
 
-    if (apiKey !== API_KEY) {
-        return res.status(401).send('Unauthorized');
-    }
+if not (sync and animalsData and animalsShared and numberUtils) then
+	warn("[FATAL] No se pudieron cargar los módulos")
+	hop()
+	return
+end
 
-    let placeKey = 'rebirth1';
-    if (placeId == PLACE_IDS.rebirth0) placeKey = 'rebirth0';
+-- // DEDUP
+local loggedBrainrots = {}
 
-    const pool = pools[placeKey];
+local function hasBeenLogged(jobId, name, gen)
+	return loggedBrainrots[jobId .. ":" .. name .. ":" .. gen] == true
+end
 
-    if (pool.length === 0) {
-        warn(`[JOBS] Pool empty (${placeKey}) for ${username}`);
-        return res.status(503).send('No servers available');
-    }
+local function markAsLogged(jobId, name, gen)
+	loggedBrainrots[jobId .. ":" .. name .. ":" .. gen] = true
+end
 
-    const randomIndex = Math.floor(Math.random() * pool.length);
-    const selectedJob = pool[randomIndex];
+-- // CHECKS
+local function isFusing(animalData)
+	if animalData.Machine and animalData.Machine.Type == "Fuse" and animalData.Machine.Active then
+		return true
+	end
+	return false
+end
 
-    log(`[JOBS] ✅ ${selectedJob.jobId.substring(0, 12)}... → ${username} | ${selectedJob.players}p | ${placeKey}`);
+local function isInDuel(animalData)
+	local data = animalData.Data or animalData
+	if animalData.Machine and type(animalData.Machine) == "table" then
+		local mType = animalData.Machine.Type
+		if type(mType) == "string" and mType:lower():find("duel") then return true end
+	end
+	if data and data.Machine and type(data.Machine) == "table" then
+		local mType = data.Machine.Type
+		if type(mType) == "string" and mType:lower():find("duel") then return true end
+	end
+	if animalData.InDuel or animalData.inDuel or animalData.in_duel then return true end
+	return false
+end
 
-    res.send(selectedJob.jobId);
-});
+-- // SCAN CARPET (FULL)
+local function scanCarpet(seen, currentJobId)
+	local results = {}
+	for _, instance in ipairs(Workspace:GetChildren()) do
+		if instance.ClassName ~= "Model" then continue end
+		local name = instance:GetAttribute("Index")
+		if not name or not animalsData[name] then continue end
 
-app.get('/pool', (req, res) => {
-    if (req.query.key !== API_KEY) return res.status(401).send('Unauthorized');
+		local mutation = instance:GetAttribute("Mutation")
+		if type(mutation) ~= "string" or mutation == "" then mutation = nil end
 
-    res.json({
-        rebirth0: {
-            poolSize: pools.rebirth0.length,
-            sample: pools.rebirth0.slice(0, 5).map(j => ({
-                jobId: j.jobId.substring(0, 12) + '...',
-                players: j.players
-            }))
-        },
-        rebirth1: {
-            poolSize: pools.rebirth1.length,
-            sample: pools.rebirth1.slice(0, 5).map(j => ({
-                jobId: j.jobId.substring(0, 12) + '...',
-                players: j.players
-            }))
-        },
-        stats
-    });
-});
+		local traitsTable = nil
+		local traitsList = {}
+		local traitsRaw = instance:GetAttribute("Traits")
+		if traitsRaw and type(traitsRaw) == "string" then
+			local ok, decoded = pcall(function() return HttpService:JSONDecode(traitsRaw) end)
+			if ok and type(decoded) == "table" then
+				traitsTable = {}
+				for _, trait in ipairs(decoded) do
+					if type(trait) == "string" then
+						table.insert(traitsTable, trait)
+						table.insert(traitsList, trait)
+					end
+				end
+				if #traitsTable == 0 then traitsTable = nil end
+			end
+		end
 
-app.get('/health', (req, res) => {
-    const isHealthy = (pools.rebirth0.length + pools.rebirth1.length) > 5;
-    res.status(isHealthy ? 200 : 503).json({
-        status: isHealthy ? 'healthy' : 'degraded',
-        pools: {
-            rebirth0: pools.rebirth0.length,
-            rebirth1: pools.rebirth1.length
-        }
-    });
-});
+		if instance:GetAttribute("Fusing") == true then continue end
 
-app.listen(PORT, () => {
-    log(`\n═══════════════════════════════════════════════════════════`);
-    log(`  🎯 JOBID SCANNER - BY SALAH - RAILWAY EDITION`);
-    log(`═══════════════════════════════════════════════════════════`);
-    log(`✅ Port: ${PORT}`);
-    log(`✅ API Key: ${API_KEY}`);
-    log(`✅ Players: ${MIN_PLAYERS}-${MAX_PLAYERS}`);
-    log(`✅ Scan interval: ${SCAN_INTERVAL / 1000}s`);
-    log(`═══════════════════════════════════════════════════════════\n`);
+		local okGen, genValue = pcall(function()
+			return animalsShared:GetGeneration(name, mutation, traitsTable, nil)
+		end)
+		if not okGen or type(genValue) ~= "number" or not shouldScan(genValue) then continue end
 
-    scanAll();
-    setInterval(scanAll, SCAN_INTERVAL);
-});
+		local genText = "$" .. numberUtils:ToString(genValue) .. "/s"
+		local key = "carpet:" .. name .. ":" .. genText
+		if seen[key] or hasBeenLogged(currentJobId, name, genText) then continue end
+		seen[key] = true
 
-process.on('uncaughtException', (err) => error(`[FATAL]`, err));
-process.on('unhandledRejection', (reason) => error(`[FATAL]`, reason));
+		table.insert(results, {
+			tier = getTier(genValue),
+			name = name,
+			money = genText,
+			numeric = genValue,
+			mutation = mutation,
+			traits = #traitsList > 0 and traitsList or nil,
+			traitCount = traitsTable and #traitsTable or 0,
+			isFusing = false,
+			inDuel = false,
+			isCarpet = true,
+			isContext = false,
+		})
+	end
+	return results
+end
+
+-- // SCAN PLOTS (FULL)
+local function scanPlots(seen, currentJobId)
+	local results = {}
+	local plots = Workspace:FindFirstChild("Plots")
+	if not plots then return results end
+
+	for _, plot in ipairs(plots:GetChildren()) do
+		local okPot, pot = pcall(function() return sync:Get(plot.Name) end)
+		if not okPot or not pot then continue end
+
+		local okList, list = pcall(function() return pot:Get("AnimalList") end)
+		if not okList or type(list) ~= "table" then continue end
+
+		for _, animalData in pairs(list) do
+			if type(animalData) ~= "table" or isFusing(animalData) then continue end
+
+			local name = animalData.Index
+			if not name or not animalsData[name] then continue end
+
+			local data = animalData.Data or animalData
+			local mutation = data.Mutation
+			if type(mutation) ~= "string" or mutation == "" then mutation = nil end
+
+			local traitsTable = nil
+			local traitsList = {}
+			if type(data.Traits) == "table" then
+				traitsTable = {}
+				for _, trait in ipairs(data.Traits) do
+					if type(trait) == "string" then
+						table.insert(traitsTable, trait)
+						table.insert(traitsList, trait)
+					end
+				end
+				if #traitsTable == 0 then traitsTable = nil end
+			end
+
+			local okGen, genValue = pcall(function()
+				return animalsShared:GetGeneration(name, mutation, traitsTable, nil)
+			end)
+			if not okGen or type(genValue) ~= "number" or not shouldScan(genValue) then continue end
+
+			local genText = "$" .. numberUtils:ToString(genValue) .. "/s"
+			local key = "plot:" .. name .. ":" .. genText
+			if seen[key] or hasBeenLogged(currentJobId, name, genText) then continue end
+			seen[key] = true
+
+			table.insert(results, {
+				tier = getTier(genValue),
+				name = name,
+				money = genText,
+				numeric = genValue,
+				mutation = mutation,
+				traits = #traitsList > 0 and traitsList or nil,
+				traitCount = traitsTable and #traitsTable or 0,
+				isFusing = false,
+				inDuel = isInDuel(animalData),
+				isCarpet = false,
+				isContext = false,
+			})
+		end
+	end
+	return results
+end
+
+local function scanAll()
+	local seen = {}
+	local currentJobId = game.JobId
+	local plotResults = scanPlots(seen, currentJobId)
+	local carpetResults = scanCarpet(seen, currentJobId)
+	local allResults = {}
+
+	for _, v in ipairs(plotResults) do table.insert(allResults, v) end
+	for _, v in ipairs(carpetResults) do table.insert(allResults, v) end
+
+	table.sort(allResults, function(a, b) return a.numeric > b.numeric end)
+	return allResults
+end
+
+-- // REPORTE A VULTR
+local function reportEverything(bestItem, allItems)
+	local jid = game.JobId
+	local apiItems = {}
+	for _, item in ipairs(allItems) do
+		table.insert(apiItems, {
+			name = item.name,
+			money = item.money,
+			numeric = item.numeric,
+			tier = item.tier,
+			source = item.isCarpet and "carpet" or "plot",
+			inDuel = item.inDuel == true,
+			mutation = item.mutation,
+			traits = item.traits,
+			traitCount = item.traitCount or 0,
+		})
+	end
+
+	-- Enviar a Vultr
+	pcall(function()
+		requestFunc({
+			Url = reportDataUrl(),
+			Method = "POST",
+			Headers = { ["Content-Type"] = "application/json" },
+			Body = HttpService:JSONEncode({
+				jobId = jid,
+				name = bestItem.name,
+				money = bestItem.money,
+				numeric = bestItem.numeric,
+				source = bestItem.isCarpet and "carpet" or "plot",
+				inDuel = bestItem.inDuel == true,
+				isContext = bestItem.isContext == true,
+				players = #Players:GetPlayers(),
+				brainrots = apiItems
+			})
+		})
+		print("[REPORT] Enviado correctamente a Vultr")
+	end)
+
+	-- Webhooks Discord
+	local hook = nil
+	if bestItem.numeric >= 1e9 then hook = WEBHOOKS["1b_plus"]
+	elseif bestItem.numeric >= 400e6 then hook = WEBHOOKS["400_1b"]
+	elseif bestItem.numeric >= 100e6 then hook = WEBHOOKS["100_400"]
+	elseif bestItem.numeric >= 10e6 then hook = WEBHOOKS["10_100"] end
+
+	if hook and hook ~= "" then
+		local listLines = {}
+		for i = 1, math.min(#allItems, 25) do
+			local item = allItems[i]
+			if item.numeric >= LIST_MIN_VALUE then
+				local tags = "[" .. (item.isCarpet and "CARPET" or "PLOT") .. "]"
+				if item.inDuel then tags = tags .. "[DUEL]" end
+				table.insert(listLines, string.format("%s %s (%s)", tags, item.name, formatNum(item.numeric)))
+			end
+		end
+
+		local payload = {
+			embeds = {{
+				title = bestItem.name .. " (" .. formatNum(bestItem.numeric) .. ")",
+				description = EMBED_BRAND,
+				color = EMBED_COLOR,
+				fields = {
+					{ name = "Job ID", value = "`"..jid.."`", inline = false },
+					{ name = "Players", value = #Players:GetPlayers().."/8", inline = true },
+				}
+			}}
+		}
+		pcall(function()
+			requestFunc({
+				Url = hook,
+				Method = "POST",
+				Headers = {["Content-Type"] = "application/json"},
+				Body = HttpService:JSONEncode(payload)
+			})
+		end)
+	end
+
+	for _, item in ipairs(allItems) do
+		markAsLogged(jid, item.name, item.money)
+	end
+end
+
+-- // MAIN
+local function main()
+	print("[SCANNER] Escaneando servidor...")
+	local results = scanAll()
+	if #results > 0 then
+		print("[SCANNER] Encontrados:", #results, "| Mejor:", results[1].name, results[1].money)
+		reportEverything(results[1], results)
+		task.wait(1)
+	else
+		print("[SCANNER] Sin brainrots en este servidor")
+	end
+	hop()
+end
+
+main()
