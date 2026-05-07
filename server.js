@@ -52,7 +52,7 @@ function warn(msg, ...args) { console.warn(`[${new Date().toISOString()}]`, msg,
 function error(msg, ...args) { console.error(`[${new Date().toISOString()}]`, msg, ...args); }
 
 async function fetchRobloxServers(placeId, cursor = null, retryCount = 0) {
-    let url = `https://games.roproxy.com/v1/games/${placeId}/servers/Public?sortOrder=Desc&limit=100`;
+    let url = `https://roblox-proxy.salahelarabi03.workers.dev/v1/games/${placeId}/servers/Public?sortOrder=Desc&limit=100`;
     if (cursor) url += `&cursor=${cursor}`;
     
     try {
