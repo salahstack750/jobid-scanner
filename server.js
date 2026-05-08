@@ -1,722 +1,831 @@
-const express = require('express');
-const cors = require('cors');
-const app = express();
-const PORT = process.env.PORT || 3000;
+// ═══════════════════════════════════════════════════════════════
+// 🚀 JOBID SCANNER + REPORTS + DASHBOARD - Railway
+// Dev by SALAH ⚡ | v3 - Brainrots TTL 60s
+// ═══════════════════════════════════════════════════════════════
 
-app.use(cors());
+const express = require('express');
+const axios = require('axios');
+
+const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-// ═══════════════════════════════════════════════════════════════
-//                    CONFIG
-// ═══════════════════════════════════════════════════════════════
+const PORT = process.env.PORT || 3000;
+const API_KEY = process.env.API_KEY || 'SALAH2026';
 
-const API_KEY = "SALAH2026";
-const PROXY_URL = "https://roblox-proxy.salahelarabi03.workers.dev";
-
-const PLACES = {
-    REBIRTH_0: "96342491571673",
-    REBIRTH_1_PLUS: "109983668079237"
+// ═══════════════════════════════════════════════════════════════
+// CONFIG
+// ═══════════════════════════════════════════════════════════════
+const POOL_CONFIG = {
+    rebirth0: { placeId: 96342491571673, label: 'Rebirth 0' },
+    rebirth1plus: { placeId: 109983668079237, label: 'Rebirth 1+' }
 };
 
-const SCAN_INTERVAL = 15000;
-const MAX_PAGES = 10;
 const MIN_PLAYERS = 6;
 const MAX_PLAYERS = 7;
-
+const SCAN_INTERVAL = 15000;
+const MAX_PAGES = 10;
 const JOBID_LOCK_TTL = 90 * 1000;
 const BOT_HISTORY_TTL = 6 * 60 * 60 * 1000;
-const POOL_TTL = 3 * 60 * 1000;
+const BRAINROT_TTL = 60 * 1000;  // ✅ 60 SECONDES
+
+const CLOUDFLARE_PROXY = 'https://roblox-proxy.salahelarabi03.workers.dev';
 
 // ═══════════════════════════════════════════════════════════════
-//                    STATE
+// STORAGE
 // ═══════════════════════════════════════════════════════════════
-
 const pools = {
-    [PLACES.REBIRTH_0]: new Map(),
-    [PLACES.REBIRTH_1_PLUS]: new Map()
+    rebirth0: [],
+    rebirth1plus: []
 };
 
 const jobLocks = new Map();
 const botHistory = new Map();
-
-// ✅ NOUVEAU: Stockage des rapports
-const reports = new Map(); // botName -> { lastReport, brainrots, etc }
-const recentBrainrots = []; // Top brainrots récents
+const reports = new Map();
+const recentBrainrots = [];  // ✅ Avec expiresAt
 
 const stats = {
-    startedAt: Date.now(),
-    totalRequests: 0,
-    successfulAssignments: 0,
-    rejectedNoServers: 0,
-    rejectedAllVisited: 0,
-    rejectedAllLocked: 0,
-    scansCompleted: 0,
-    scansFailed: 0,
-    reportsReceived: 0
+    totalScans: 0,
+    jobsServed: 0,
+    reportsReceived: 0,
+    startedAt: Date.now()
 };
 
 // ═══════════════════════════════════════════════════════════════
-//                    SCANNER ROBLOX
+// HELPERS
 // ═══════════════════════════════════════════════════════════════
+function checkAuth(req, res) {
+    const key = req.query.key || req.headers['x-api-key'];
+    if (key !== API_KEY) {
+        res.status(401).json({ error: 'Invalid API key' });
+        return false;
+    }
+    return true;
+}
 
-async function fetchServersPage(placeId, cursor = "") {
-    const url = `${PROXY_URL}/v1/games/${placeId}/servers/Public?sortOrder=Desc&excludeFullGames=true&limit=100${cursor ? `&cursor=${cursor}` : ''}`;
+function cleanupExpired() {
+    const now = Date.now();
     
-    try {
-        const response = await fetch(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        });
-        
-        if (!response.ok) {
-            console.error(`[SCAN] HTTP ${response.status} for ${placeId}`);
-            return null;
+    // Cleanup jobLocks
+    for (const [jobId, lock] of jobLocks.entries()) {
+        if (lock.expiresAt < now) jobLocks.delete(jobId);
+    }
+    
+    // Cleanup botHistory
+    for (const [botName, hist] of botHistory.entries()) {
+        if (now - hist.lastSeen > BOT_HISTORY_TTL) botHistory.delete(botName);
+    }
+    
+    // ✅ Cleanup brainrots expirés (>60s)
+    for (let i = recentBrainrots.length - 1; i >= 0; i--) {
+        if (recentBrainrots[i].expiresAt < now) {
+            recentBrainrots.splice(i, 1);
         }
-        
-        return await response.json();
-    } catch (err) {
-        console.error(`[SCAN] Fetch error:`, err.message);
+    }
+}
+
+setInterval(cleanupExpired, 5000);
+
+// ═══════════════════════════════════════════════════════════════
+// SCAN POOL
+// ═══════════════════════════════════════════════════════════════
+async function fetchServers(placeId, cursor = '') {
+    const url = `${CLOUDFLARE_PROXY}/games/${placeId}/servers/Public?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
+    try {
+        const response = await axios.get(url, { timeout: 8000 });
+        return response.data;
+    } catch (error) {
+        console.error(`[SCAN] Erreur ${placeId}:`, error.message);
         return null;
     }
 }
 
-async function scanPlace(placeId) {
-    const pool = pools[placeId];
-    let totalServers = 0;
-    let cursor = "";
-    let pages = 0;
+async function scanPool(poolKey) {
+    const config = POOL_CONFIG[poolKey];
+    if (!config) return;
     
-    while (pages < MAX_PAGES) {
-        const data = await fetchServersPage(placeId, cursor);
-        
-        if (!data || !data.data) {
-            stats.scansFailed++;
-            break;
-        }
+    const newPool = [];
+    let cursor = '';
+    
+    for (let page = 0; page < MAX_PAGES; page++) {
+        const data = await fetchServers(config.placeId, cursor);
+        if (!data || !data.data) break;
         
         for (const server of data.data) {
-            const playing = server.playing || 0;
-            const maxPlayers = server.maxPlayers || 8;
-            
-            if (playing >= MIN_PLAYERS && playing <= MAX_PLAYERS) {
-                pool.set(server.id, {
-                    players: playing,
-                    maxPlayers: maxPlayers,
-                    addedAt: Date.now()
+            if (server.playing >= MIN_PLAYERS && server.playing <= MAX_PLAYERS) {
+                newPool.push({
+                    jobId: server.id,
+                    players: server.playing,
+                    maxPlayers: server.maxPlayers
                 });
-                totalServers++;
             }
         }
         
         if (!data.nextPageCursor) break;
         cursor = data.nextPageCursor;
-        pages++;
+        await new Promise(r => setTimeout(r, 200));
     }
     
-    const now = Date.now();
-    for (const [jobId, info] of pool.entries()) {
-        if (now - info.addedAt > POOL_TTL) {
-            pool.delete(jobId);
-        }
-    }
-    
-    stats.scansCompleted++;
-    console.log(`[SCAN] ${placeId.slice(0, 8)}... → ${totalServers} serveurs (pool: ${pool.size}, pages: ${pages})`);
+    pools[poolKey] = newPool;
+    stats.totalScans++;
+    console.log(`[SCAN] ${config.label}: ${newPool.length} serveurs ${MIN_PLAYERS}-${MAX_PLAYERS}j`);
 }
 
-async function scannerLoop() {
+async function scanLoop() {
     while (true) {
         try {
             await Promise.all([
-                scanPlace(PLACES.REBIRTH_0),
-                scanPlace(PLACES.REBIRTH_1_PLUS)
+                scanPool('rebirth0'),
+                scanPool('rebirth1plus')
             ]);
-        } catch (err) {
-            console.error(`[SCAN] Loop error:`, err.message);
+        } catch (e) {
+            console.error('[SCAN] Erreur:', e.message);
         }
-        
-        await new Promise(resolve => setTimeout(resolve, SCAN_INTERVAL));
+        await new Promise(r => setTimeout(r, SCAN_INTERVAL));
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
-//                    CLEANUP
+// ENDPOINTS
 // ═══════════════════════════════════════════════════════════════
 
-function cleanupExpiredLocks() {
-    const now = Date.now();
-    let cleaned = 0;
-    for (const [jobId, lock] of jobLocks.entries()) {
-        if (now - lock.lockedAt > JOBID_LOCK_TTL) {
-            jobLocks.delete(jobId);
-            cleaned++;
-        }
-    }
-    if (cleaned > 0) console.log(`[CLEANUP] ${cleaned} locks expirés`);
-}
-
-function cleanupExpiredHistory() {
-    const now = Date.now();
-    let totalCleaned = 0;
-    for (const [botName, history] of botHistory.entries()) {
-        for (const [jobId, visitedAt] of history.entries()) {
-            if (now - visitedAt > BOT_HISTORY_TTL) {
-                history.delete(jobId);
-                totalCleaned++;
-            }
-        }
-        if (history.size === 0) botHistory.delete(botName);
-    }
-    if (totalCleaned > 0) console.log(`[CLEANUP] ${totalCleaned} entrées d'historique expirées`);
-}
-
-setInterval(() => {
-    cleanupExpiredLocks();
-    cleanupExpiredHistory();
-}, 30000);
-
-// ═══════════════════════════════════════════════════════════════
-//                    SMART DISTRIBUTION
-// ═══════════════════════════════════════════════════════════════
-
-function getJobIdForBot(placeId, botName) {
-    const pool = pools[placeId];
-    
-    if (!pool || pool.size === 0) {
-        stats.rejectedNoServers++;
-        return { error: 'NO_SERVERS', message: 'Pool vide' };
-    }
-    
-    let history = botHistory.get(botName);
-    if (!history) {
-        history = new Map();
-        botHistory.set(botName, history);
-    }
-    
-    const availableJobs = [];
-    
-    for (const [jobId, info] of pool.entries()) {
-        const lock = jobLocks.get(jobId);
-        if (lock && lock.botName !== botName) continue;
-        if (history.has(jobId)) continue;
-        availableJobs.push({ jobId, info });
-    }
-    
-    if (availableJobs.length === 0) {
-        let allLocked = true;
-        let allVisited = true;
-        for (const [jobId] of pool.entries()) {
-            const lock = jobLocks.get(jobId);
-            if (!lock || lock.botName === botName) allLocked = false;
-            if (!history.has(jobId)) allVisited = false;
-        }
-        if (allVisited) {
-            stats.rejectedAllVisited++;
-            return { error: 'ALL_VISITED', message: 'Tous les serveurs déjà visités par ce bot' };
-        }
-        if (allLocked) {
-            stats.rejectedAllLocked++;
-            return { error: 'ALL_LOCKED', message: 'Tous les serveurs sont lockés' };
-        }
-        return { error: 'NO_AVAILABLE', message: 'Aucun serveur disponible' };
-    }
-    
-    const selected = availableJobs[Math.floor(Math.random() * availableJobs.length)];
-    
-    jobLocks.set(selected.jobId, {
-        botName: botName,
-        lockedAt: Date.now()
-    });
-    
-    history.set(selected.jobId, Date.now());
-    
-    stats.successfulAssignments++;
-    
-    console.log(`[ASSIGN] ${botName} → ${selected.jobId.slice(0, 12)}... (${selected.info.players}/${selected.info.maxPlayers})`);
-    
-    return {
-        jobId: selected.jobId,
-        players: selected.info.players,
-        maxPlayers: selected.info.maxPlayers
-    };
-}
-
-// ═══════════════════════════════════════════════════════════════
-//                    ENDPOINTS
-// ═══════════════════════════════════════════════════════════════
-
-app.get('/jobs', (req, res) => {
-    stats.totalRequests++;
-    
-    const { placeId, key } = req.query;
-    const botName = req.headers.username || 'anonymous';
-    
-    if (key !== API_KEY) return res.status(401).send('Unauthorized');
-    if (!placeId || !pools[placeId]) return res.status(400).send('Invalid placeId');
-    
-    const result = getJobIdForBot(placeId, botName);
-    
-    if (result.error) return res.status(503).send(result.message);
-    
-    res.type('text/plain').send(result.jobId);
-});
-
-// ✅ NOUVEAU: REPORT DATA - Recevoir les rapports des bots
-app.post('/report-data', (req, res) => {
-    const { key } = req.query;
-    if (key !== API_KEY) return res.status(401).json({ error: 'Invalid key' });
-    
-    const data = req.body;
-    if (!data || !data.botName) return res.status(400).json({ error: 'Missing botName' });
-    
-    stats.reportsReceived++;
-    
-    // Stocker le rapport du bot
-    reports.set(data.botName, {
-        ...data,
-        receivedAt: Date.now()
-    });
-    
-    // Si brainrot >= 40M, ajouter au top
-    if (data.numeric && data.numeric >= 40000000) {
-        recentBrainrots.unshift({
-            botName: data.botName,
-            jobId: data.jobId,
-            name: data.name,
-            money: data.money,
-            numeric: data.numeric,
-            mutation: data.mutation,
-            source: data.source,
-            timestamp: Date.now()
-        });
-        
-        if (recentBrainrots.length > 50) {
-            recentBrainrots.pop();
-        }
-    }
-    
-    console.log(`[REPORT] ${data.botName} → ${data.name || 'no brainrot'} (${data.money || ''})`);
-    res.json({ success: true });
-});
-
-app.post('/report-failed', (req, res) => {
-    const { jobId, key } = req.body;
-    const botName = req.headers.username || 'anonymous';
-    
-    if (key !== API_KEY) return res.status(401).send('Unauthorized');
-    if (!jobId) return res.status(400).send('Missing jobId');
-    
-    for (const placeId of Object.keys(pools)) {
-        pools[placeId].delete(jobId);
-    }
-    jobLocks.delete(jobId);
-    
-    console.log(`[FAILED] ${botName} signale échec sur ${jobId.slice(0, 12)}...`);
-    res.send('OK');
-});
-
-app.get('/stats', (req, res) => {
-    const uptime = Math.floor((Date.now() - stats.startedAt) / 1000);
-    const uptimeHours = Math.floor(uptime / 3600);
-    const uptimeMins = Math.floor((uptime % 3600) / 60);
-    
+app.get('/', (req, res) => {
     res.json({
-        uptime: `${uptimeHours}h ${uptimeMins}m`,
-        pools: {
-            rebirth0: pools[PLACES.REBIRTH_0].size,
-            rebirth1plus: pools[PLACES.REBIRTH_1_PLUS].size
-        },
-        activeLocks: jobLocks.size,
-        botsTracked: botHistory.size,
-        reportsStored: reports.size,
-        recentBrainrots: recentBrainrots.length,
-        stats: stats
-    });
-});
-
-app.get('/bots', (req, res) => {
-    const bots = [];
-    
-    for (const [botName, history] of botHistory.entries()) {
-        let lastJobId = null;
-        let lastVisitedAt = 0;
-        
-        for (const [jobId, visitedAt] of history.entries()) {
-            if (visitedAt > lastVisitedAt) {
-                lastVisitedAt = visitedAt;
-                lastJobId = jobId;
-            }
+        name: 'JobID Scanner + Reports',
+        version: '3.0',
+        endpoints: {
+            'GET /health': 'Status',
+            'GET /jobs?placeId=X&key=KEY': 'Get JobID',
+            'POST /report-data?key=KEY': 'Send brainrot report',
+            'POST /report-failed?key=KEY': 'Report failed JobID',
+            'GET /stats': 'Stats',
+            'GET /bots': 'Bot list',
+            'GET /pool?key=KEY': 'Pool details',
+            'GET /api/dashboard-data': 'Dashboard JSON',
+            'GET /dashboard': 'HTML Dashboard'
         }
-        
-        let currentLock = null;
-        for (const [jobId, lock] of jobLocks.entries()) {
-            if (lock.botName === botName) {
-                currentLock = jobId;
-                break;
-            }
-        }
-        
-        bots.push({
-            botName: botName,
-            serversVisited: history.size,
-            lastJobId: lastJobId ? lastJobId.slice(0, 12) + '...' : null,
-            lastVisitedAgo: lastVisitedAt ? `${Math.floor((Date.now() - lastVisitedAt) / 1000)}s` : null,
-            currentlyOn: currentLock ? currentLock.slice(0, 12) + '...' : null
-        });
-    }
-    
-    bots.sort((a, b) => b.serversVisited - a.serversVisited);
-    
-    res.json({
-        totalBots: bots.length,
-        bots: bots
     });
 });
 
 app.get('/health', (req, res) => {
     res.json({
-        status: 'OK',
+        status: 'ok',
         uptime: Math.floor((Date.now() - stats.startedAt) / 1000),
         pools: {
-            rebirth0: pools[PLACES.REBIRTH_0].size,
-            rebirth1plus: pools[PLACES.REBIRTH_1_PLUS].size
+            rebirth0: pools.rebirth0.length,
+            rebirth1plus: pools.rebirth1plus.length
         }
     });
 });
 
-app.get('/pool', (req, res) => {
-    const { key } = req.query;
-    if (key !== API_KEY) return res.status(401).send('Unauthorized');
+app.get('/jobs', (req, res) => {
+    if (!checkAuth(req, res)) return;
     
-    const result = {};
-    for (const [placeId, pool] of Object.entries(pools)) {
-        result[placeId] = Array.from(pool.entries()).map(([jobId, info]) => ({
-            jobId: jobId.slice(0, 12) + '...',
-            players: info.players,
-            maxPlayers: info.maxPlayers,
-            ageSeconds: Math.floor((Date.now() - info.addedAt) / 1000)
-        }));
+    const placeId = parseInt(req.query.placeId);
+    const username = req.headers.username || 'anonymous';
+    
+    let poolKey;
+    if (placeId === POOL_CONFIG.rebirth0.placeId) poolKey = 'rebirth0';
+    else if (placeId === POOL_CONFIG.rebirth1plus.placeId) poolKey = 'rebirth1plus';
+    else return res.status(400).send('Invalid placeId');
+    
+    const pool = pools[poolKey];
+    if (!pool || pool.length === 0) {
+        return res.status(503).send('Pool empty');
     }
     
-    res.json(result);
-});
-
-// ✅ NOUVEAU: API pour le dashboard frontend
-app.get('/api/dashboard-data', (req, res) => {
-    const now = Date.now();
-    const botsArray = [];
-    let activeBots = 0;
-    let deadBots = 0;
-    let slowBots = 0;
-    
-    for (const [botName, history] of botHistory.entries()) {
-        let lastJobId = null;
-        let lastVisitedAt = 0;
-        
-        for (const [jobId, visitedAt] of history.entries()) {
-            if (visitedAt > lastVisitedAt) {
-                lastVisitedAt = visitedAt;
-                lastJobId = jobId;
-            }
-        }
-        
-        const lastVisitedAgo = Math.floor((now - lastVisitedAt) / 1000);
-        const isDead = lastVisitedAgo > 300;
-        const isActive = lastVisitedAgo < 30;
-        const isSlow = !isDead && !isActive;
-        
-        if (isDead) deadBots++;
-        else if (isActive) activeBots++;
-        else slowBots++;
-        
-        let currentLock = null;
-        for (const [jobId, lock] of jobLocks.entries()) {
-            if (lock.botName === botName) {
-                currentLock = jobId;
-                break;
-            }
-        }
-        
-        const report = reports.get(botName);
-        
-        botsArray.push({
-            botName,
-            serversVisited: history.size,
-            lastVisitedAgo,
-            isActive,
-            isDead,
-            isSlow,
-            currentJobId: currentLock,
-            lastBrainrot: report ? {
-                name: report.name,
-                money: report.money,
-                numeric: report.numeric,
-                mutation: report.mutation,
-                receivedAt: report.receivedAt
-            } : null
+    // Update bot history
+    if (!botHistory.has(username)) {
+        botHistory.set(username, {
+            firstSeen: Date.now(),
+            lastSeen: Date.now(),
+            jobsReceived: 0,
+            currentJobId: null,
+            visitedJobs: new Set()
         });
     }
     
-    botsArray.sort((a, b) => b.serversVisited - a.serversVisited);
+    const botData = botHistory.get(username);
+    botData.lastSeen = Date.now();
+    botData.jobsReceived++;
+    
+    // Find unlocked job
+    const now = Date.now();
+    const candidates = pool.filter(s => {
+        const lock = jobLocks.get(s.jobId);
+        if (lock && lock.expiresAt > now && lock.botName !== username) return false;
+        if (botData.visitedJobs.has(s.jobId)) return false;
+        return true;
+    });
+    
+    if (candidates.length === 0) {
+        botData.visitedJobs = new Set();
+        return res.status(503).send('All locked or visited');
+    }
+    
+    const selected = candidates[Math.floor(Math.random() * candidates.length)];
+    
+    jobLocks.set(selected.jobId, {
+        botName: username,
+        expiresAt: now + JOBID_LOCK_TTL
+    });
+    
+    botData.currentJobId = selected.jobId;
+    botData.visitedJobs.add(selected.jobId);
+    stats.jobsServed++;
+    
+    res.send(selected.jobId);
+});
+
+app.post('/report-data', (req, res) => {
+    if (!checkAuth(req, res)) return;
+    
+    const { botName, jobId, name, money, numeric, mutation, players, brainrots } = req.body;
+    
+    if (!botName) return res.status(400).json({ error: 'botName required' });
+    
+    stats.reportsReceived++;
+    
+    // Save report
+    reports.set(botName, {
+        botName,
+        jobId,
+        lastBrainrot: { name, money, numeric, mutation },
+        players,
+        brainrots: brainrots || [],
+        receivedAt: Date.now()
+    });
+    
+    // ✅ Add brainrots ≥ 40M to recentBrainrots avec expiresAt
+    if (numeric >= 40000000 && name) {
+        const now = Date.now();
+        recentBrainrots.unshift({
+            botName,
+            jobId,
+            name,
+            money,
+            numeric,
+            mutation,
+            receivedAt: now,
+            expiresAt: now + BRAINROT_TTL  // ✅ Expire dans 60s
+        });
+        
+        // Limite max 100
+        if (recentBrainrots.length > 100) recentBrainrots.length = 100;
+    }
+    
+    res.json({ ok: true });
+});
+
+app.post('/report-failed', (req, res) => {
+    if (!checkAuth(req, res)) return;
+    const { jobId, botName } = req.body;
+    if (jobId) jobLocks.delete(jobId);
+    res.json({ ok: true });
+});
+
+app.get('/stats', (req, res) => {
+    res.json({
+        ...stats,
+        uptime: Math.floor((Date.now() - stats.startedAt) / 1000),
+        pools: {
+            rebirth0: pools.rebirth0.length,
+            rebirth1plus: pools.rebirth1plus.length
+        },
+        bots: botHistory.size,
+        reports: reports.size,
+        recentBrainrots: recentBrainrots.length
+    });
+});
+
+app.get('/bots', (req, res) => {
+    const now = Date.now();
+    const list = [];
+    
+    for (const [botName, data] of botHistory.entries()) {
+        const report = reports.get(botName);
+        const sinceLastJob = (now - data.lastSeen) / 1000;
+        
+        list.push({
+            botName,
+            jobsReceived: data.jobsReceived,
+            currentJobId: data.currentJobId,
+            lastSeenSeconds: Math.floor(sinceLastJob),
+            isActive: sinceLastJob < 30,
+            isDead: sinceLastJob > 300,
+            lastBrainrot: report ? report.lastBrainrot : null,
+            players: report ? report.players : null
+        });
+    }
+    
+    list.sort((a, b) => b.jobsReceived - a.jobsReceived);
+    res.json(list);
+});
+
+app.get('/pool', (req, res) => {
+    if (!checkAuth(req, res)) return;
+    res.json(pools);
+});
+
+// ═══════════════════════════════════════════════════════════════
+// DASHBOARD JSON API
+// ═══════════════════════════════════════════════════════════════
+app.get('/api/dashboard-data', (req, res) => {
+    const now = Date.now();
+    
+    let active = 0, slow = 0, dead = 0;
+    const bots = [];
+    
+    for (const [botName, data] of botHistory.entries()) {
+        const report = reports.get(botName);
+        const sinceLastJob = (now - data.lastSeen) / 1000;
+        
+        const isActive = sinceLastJob < 30;
+        const isSlow = sinceLastJob >= 30 && sinceLastJob < 300;
+        const isDead = sinceLastJob >= 300;
+        
+        if (isActive) active++;
+        else if (isSlow) slow++;
+        else dead++;
+        
+        bots.push({
+            botName,
+            jobsReceived: data.jobsReceived,
+            currentJobId: data.currentJobId,
+            lastSeenSeconds: Math.floor(sinceLastJob),
+            isActive,
+            isSlow,
+            isDead,
+            lastBrainrot: report ? report.lastBrainrot : null,
+            players: report ? report.players : null
+        });
+    }
+    
+    bots.sort((a, b) => b.jobsReceived - a.jobsReceived);
+    
+    // ✅ Filtrer les brainrots non-expirés et ajouter remainingSeconds
+    const activeBrainrots = recentBrainrots
+        .filter(b => b.expiresAt > now)
+        .map(b => ({
+            ...b,
+            remainingSeconds: Math.ceil((b.expiresAt - now) / 1000)
+        }));
     
     res.json({
         stats: {
-            totalBots: botsArray.length,
-            activeBots,
-            slowBots,
-            deadBots,
-            poolSize: pools[PLACES.REBIRTH_0].size + pools[PLACES.REBIRTH_1_PLUS].size,
-            totalScans: stats.scansCompleted,
-            totalAssignments: stats.successfulAssignments,
-            reportsReceived: stats.reportsReceived,
-            uptime: Math.floor((Date.now() - stats.startedAt) / 1000)
+            totalBots: botHistory.size,
+            active,
+            slow,
+            dead,
+            poolServers: pools.rebirth0.length + pools.rebirth1plus.length,
+            totalScans: stats.totalScans,
+            reportsReceived: stats.reportsReceived
         },
-        bots: botsArray,
-        recentBrainrots: recentBrainrots.slice(0, 20)
+        bots,
+        recentBrainrots: activeBrainrots
     });
 });
 
-// ✅ NOUVEAU: DASHBOARD HTML
+// ═══════════════════════════════════════════════════════════════
+// DASHBOARD HTML
+// ═══════════════════════════════════════════════════════════════
 app.get('/dashboard', (req, res) => {
-    res.send(getDashboardHTML());
-});
-
-app.get('/', (req, res) => {
-    res.json({
-        service: 'JobID Scanner - Smart Distribution + Dashboard',
-        endpoints: [
-            'GET /jobs?placeId=X&key=Y (header: username)',
-            'GET /dashboard',
-            'POST /report-data?key=Y',
-            'GET /stats',
-            'GET /bots',
-            'GET /pool?key=Y',
-            'GET /health',
-            'POST /report-failed'
-        ]
-    });
-});
-
-// ═══════════════════════════════════════════════════════════════
-//                    DASHBOARD HTML
-// ═══════════════════════════════════════════════════════════════
-
-function getDashboardHTML() {
-    return `<!DOCTYPE html>
+    res.setHeader('Content-Type', 'text/html');
+    res.send(`<!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<title>Flash Notifier Pro - Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>⚡ Flash Notifier Pro</title>
 <style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { 
-    font-family: 'Inter', -apple-system, sans-serif; 
-    background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%);
-    color: #fff; min-height: 100vh; padding: 20px;
-}
-.container { max-width: 1400px; margin: 0 auto; }
-h1 { 
-    text-align: center; 
-    background: linear-gradient(90deg, #00d4ff, #0070f3);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    font-size: 2.5em; margin-bottom: 5px;
-}
-.subtitle { text-align: center; color: #8b8fb1; margin-bottom: 30px; font-size: 0.9em; letter-spacing: 2px; }
-.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 30px; }
-.stat-card { 
-    background: rgba(20, 25, 60, 0.6); backdrop-filter: blur(10px);
-    border: 1px solid rgba(0, 212, 255, 0.2);
-    border-radius: 12px; padding: 20px; text-align: center;
-    transition: transform 0.2s;
-}
-.stat-card:hover { transform: translateY(-2px); border-color: #00d4ff; }
-.stat-label { color: #8b8fb1; font-size: 0.75em; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
-.stat-value { font-size: 2.2em; font-weight: 700; }
-.stat-value.cyan { color: #00d4ff; }
-.stat-value.green { color: #00ff88; }
-.stat-value.red { color: #ff4757; }
-.stat-value.orange { color: #ffa502; }
-.stat-value.purple { color: #a55eea; }
-
-.section { 
-    background: rgba(20, 25, 60, 0.4); backdrop-filter: blur(10px);
-    border: 1px solid rgba(0, 212, 255, 0.1);
-    border-radius: 12px; padding: 25px; margin-bottom: 20px;
-}
-.section h2 { color: #00d4ff; margin-bottom: 20px; font-size: 1.3em; }
-.filters { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
-.filter-btn { 
-    background: rgba(0, 212, 255, 0.1);
-    border: 1px solid rgba(0, 212, 255, 0.3);
-    color: #fff; padding: 8px 16px; border-radius: 8px;
-    cursor: pointer; transition: all 0.2s; font-size: 0.85em;
-}
-.filter-btn:hover, .filter-btn.active { background: #00d4ff; color: #0a0e27; }
-
-.bot-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
-.bot-card { 
-    background: rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 10px; padding: 15px; transition: all 0.2s;
-}
-.bot-card.active { border-left: 3px solid #00ff88; }
-.bot-card.slow { border-left: 3px solid #ffa502; }
-.bot-card.dead { border-left: 3px solid #ff4757; opacity: 0.5; }
-.bot-name { font-weight: 600; font-size: 1em; margin-bottom: 8px; }
-.bot-info { display: flex; justify-content: space-between; font-size: 0.8em; color: #8b8fb1; margin-bottom: 4px; }
-.bot-info span:last-child { color: #fff; }
-.bot-status { 
-    display: inline-block; padding: 2px 8px; border-radius: 6px;
-    font-size: 0.7em; text-transform: uppercase; font-weight: 600; margin-bottom: 8px;
-}
-.status-active { background: rgba(0, 255, 136, 0.2); color: #00ff88; }
-.status-slow { background: rgba(255, 165, 2, 0.2); color: #ffa502; }
-.status-dead { background: rgba(255, 71, 87, 0.2); color: #ff4757; }
-
-.brainrot-info { 
-    background: rgba(0, 212, 255, 0.05); padding: 8px; border-radius: 6px;
-    margin-top: 8px; font-size: 0.85em;
-}
-.brainrot-info strong { color: #00d4ff; }
-
-.brainrot-list { display: grid; grid-template-columns: 1fr; gap: 8px; }
-.brainrot-item { 
-    background: rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(0, 212, 255, 0.2);
-    border-radius: 8px; padding: 12px;
-    display: flex; justify-content: space-between; align-items: center;
-}
-.brainrot-name { color: #00d4ff; font-weight: 600; }
-.brainrot-value { color: #00ff88; font-weight: 700; font-size: 1.1em; }
-
-.footer { text-align: center; color: #8b8fb1; margin-top: 30px; font-size: 0.8em; }
-.live-indicator { 
-    display: inline-block; width: 8px; height: 8px;
-    background: #00ff88; border-radius: 50%;
-    margin-right: 6px; animation: pulse 1.5s infinite;
-}
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-.search-box { 
-    width: 100%; padding: 10px 15px;
-    background: rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(0, 212, 255, 0.2);
-    border-radius: 8px; color: #fff;
-    font-size: 0.9em; margin-bottom: 15px;
-}
-.search-box:focus { outline: none; border-color: #00d4ff; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background: linear-gradient(135deg, #0a0e1a 0%, #1a1f2e 100%);
+        color: #fff;
+        min-height: 100vh;
+        padding: 20px;
+    }
+    .container { max-width: 1400px; margin: 0 auto; }
+    .header {
+        text-align: center;
+        margin-bottom: 30px;
+    }
+    .header h1 {
+        font-size: 36px;
+        background: linear-gradient(90deg, #00d4ff, #00ffaa);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-weight: 900;
+    }
+    .header .subtitle {
+        color: #00ffaa;
+        margin-top: 5px;
+        font-size: 12px;
+    }
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 15px;
+        margin-bottom: 30px;
+    }
+    .stat-card {
+        background: rgba(20, 30, 50, 0.6);
+        border: 1px solid rgba(100, 150, 255, 0.2);
+        border-radius: 12px;
+        padding: 20px;
+        text-align: center;
+        backdrop-filter: blur(10px);
+    }
+    .stat-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        color: #888;
+        margin-bottom: 8px;
+        letter-spacing: 1px;
+    }
+    .stat-value {
+        font-size: 32px;
+        font-weight: 900;
+    }
+    .stat-card.total .stat-value { color: #00d4ff; }
+    .stat-card.active .stat-value { color: #00ffaa; }
+    .stat-card.slow .stat-value { color: #ffaa00; }
+    .stat-card.dead .stat-value { color: #ff5555; }
+    .stat-card.pool .stat-value { color: #aa55ff; }
+    .stat-card.scans .stat-value { color: #00aaff; }
+    .stat-card.reports .stat-value { color: #00ff77; }
+    
+    .section {
+        background: rgba(20, 30, 50, 0.4);
+        border: 1px solid rgba(100, 150, 255, 0.2);
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 20px;
+    }
+    .section-title {
+        font-size: 18px;
+        font-weight: 700;
+        color: #00d4ff;
+        margin-bottom: 15px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    
+    /* BRAINROTS LIST avec compteur 60s */
+    .brainrot-item {
+        background: rgba(0, 60, 80, 0.3);
+        border-left: 3px solid #00d4ff;
+        border-radius: 6px;
+        padding: 12px 15px;
+        margin-bottom: 8px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        transition: all 0.3s ease;
+        position: relative;
+        overflow: hidden;
+    }
+    .brainrot-item::after {
+        content: '';
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        height: 3px;
+        background: linear-gradient(90deg, #00ffaa, #ffaa00, #ff5555);
+        transition: width 1s linear;
+    }
+    .brainrot-info { flex: 1; }
+    .brainrot-name {
+        font-size: 14px;
+        font-weight: 700;
+        color: #00d4ff;
+    }
+    .brainrot-bot {
+        font-size: 11px;
+        color: #888;
+        margin-top: 2px;
+    }
+    .brainrot-meta {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+    .brainrot-money {
+        font-size: 16px;
+        font-weight: 900;
+        color: #00ff77;
+    }
+    .brainrot-timer {
+        font-size: 13px;
+        font-weight: 700;
+        background: rgba(0, 0, 0, 0.4);
+        padding: 4px 10px;
+        border-radius: 12px;
+        min-width: 50px;
+        text-align: center;
+    }
+    .brainrot-timer.fresh { color: #00ffaa; }
+    .brainrot-timer.medium { color: #ffaa00; }
+    .brainrot-timer.expiring { color: #ff5555; animation: pulse 0.5s infinite; }
+    
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+    
+    .search-bar {
+        width: 100%;
+        background: rgba(10, 15, 25, 0.6);
+        border: 1px solid rgba(100, 150, 255, 0.3);
+        border-radius: 8px;
+        padding: 10px 15px;
+        color: #fff;
+        margin-bottom: 15px;
+    }
+    .search-bar:focus {
+        outline: none;
+        border-color: #00d4ff;
+    }
+    
+    .filter-tabs {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 15px;
+        flex-wrap: wrap;
+    }
+    .filter-tab {
+        background: rgba(10, 15, 25, 0.6);
+        border: 1px solid rgba(100, 150, 255, 0.3);
+        border-radius: 8px;
+        padding: 8px 16px;
+        color: #aaa;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 600;
+        transition: all 0.2s;
+    }
+    .filter-tab.active {
+        background: #00d4ff;
+        color: #0a0e1a;
+        border-color: #00d4ff;
+    }
+    
+    .bots-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 12px;
+    }
+    .bot-card {
+        background: rgba(15, 25, 45, 0.6);
+        border-left: 4px solid #444;
+        border-radius: 8px;
+        padding: 14px;
+        transition: all 0.2s;
+    }
+    .bot-card.active { border-left-color: #00ffaa; }
+    .bot-card.slow { border-left-color: #ffaa00; }
+    .bot-card.dead { border-left-color: #ff5555; opacity: 0.6; }
+    
+    .bot-status {
+        font-size: 10px;
+        font-weight: 700;
+        padding: 3px 8px;
+        border-radius: 4px;
+        display: inline-block;
+        margin-bottom: 8px;
+    }
+    .bot-status.active { background: #00ffaa; color: #0a0e1a; }
+    .bot-status.slow { background: #ffaa00; color: #0a0e1a; }
+    .bot-status.dead { background: #ff5555; color: #fff; }
+    
+    .bot-name {
+        font-weight: 700;
+        font-size: 14px;
+        margin-bottom: 8px;
+    }
+    .bot-stat {
+        display: flex;
+        justify-content: space-between;
+        font-size: 12px;
+        color: #aaa;
+        padding: 2px 0;
+    }
+    .bot-stat .value { color: #fff; font-weight: 600; }
+    .bot-brainrot {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(255,255,255,0.1);
+        font-size: 12px;
+    }
+    .bot-brainrot .name { color: #00d4ff; font-weight: 700; }
+    .bot-brainrot .money { color: #00ff77; }
+    
+    .footer {
+        text-align: center;
+        margin-top: 30px;
+        color: #555;
+        font-size: 11px;
+    }
 </style>
 </head>
 <body>
 <div class="container">
-    <h1>⚡ FLASH NOTIFIER PRO</h1>
-    <div class="subtitle"><span class="live-indicator"></span>BOT MONITOR DASHBOARD</div>
-    
-    <div class="stats" id="stats"></div>
-    
-    <div class="section">
-        <h2>💎 Brainrots Trouvés (≥40M)</h2>
-        <div class="brainrot-list" id="brainrots"></div>
+    <div class="header">
+        <h1>⚡ FLASH NOTIFIER PRO</h1>
+        <div class="subtitle">● BOT MONITOR DASHBOARD</div>
     </div>
     
-    <div class="section">
-        <h2>🤖 Liste des Bots</h2>
-        <input type="text" class="search-box" id="search" placeholder="🔍 Rechercher un bot..." />
-        <div class="filters">
-            <button class="filter-btn active" data-filter="all">Tous</button>
-            <button class="filter-btn" data-filter="active">✅ Actifs</button>
-            <button class="filter-btn" data-filter="slow">🟡 Lents</button>
-            <button class="filter-btn" data-filter="dead">💀 Morts</button>
+    <div class="stats-grid">
+        <div class="stat-card total">
+            <div class="stat-label">TOTAL BOTS</div>
+            <div class="stat-value" id="stat-total">0</div>
         </div>
-        <div class="bot-list" id="bots"></div>
+        <div class="stat-card active">
+            <div class="stat-label">✅ ACTIFS</div>
+            <div class="stat-value" id="stat-active">0</div>
+        </div>
+        <div class="stat-card slow">
+            <div class="stat-label">🟡 LENTS</div>
+            <div class="stat-value" id="stat-slow">0</div>
+        </div>
+        <div class="stat-card dead">
+            <div class="stat-label">💀 MORTS</div>
+            <div class="stat-value" id="stat-dead">0</div>
+        </div>
+        <div class="stat-card pool">
+            <div class="stat-label">POOL SERVEURS</div>
+            <div class="stat-value" id="stat-pool">0</div>
+        </div>
+        <div class="stat-card scans">
+            <div class="stat-label">TOTAL SCANS</div>
+            <div class="stat-value" id="stat-scans">0</div>
+        </div>
+        <div class="stat-card reports">
+            <div class="stat-label">REPORTS</div>
+            <div class="stat-value" id="stat-reports">0</div>
+        </div>
     </div>
     
-    <div class="footer">Dev by SALAH ⚡ | Refresh auto: 5s</div>
+    <div class="section" id="brainrots-section" style="display: none;">
+        <div class="section-title">💎 Brainrots Trouvés (≥40M) <span style="color:#888;font-size:11px;font-weight:400;">— restent 60s</span></div>
+        <div id="brainrots-list"></div>
+    </div>
+    
+    <div class="section">
+        <div class="section-title">🤖 Liste des Bots</div>
+        <input type="text" class="search-bar" id="search" placeholder="🔍 Rechercher un bot...">
+        <div class="filter-tabs">
+            <div class="filter-tab active" data-filter="all">Tous</div>
+            <div class="filter-tab" data-filter="active">✅ Actifs</div>
+            <div class="filter-tab" data-filter="slow">🟡 Lents</div>
+            <div class="filter-tab" data-filter="dead">💀 Morts</div>
+        </div>
+        <div class="bots-grid" id="bots-grid"></div>
+    </div>
+    
+    <div class="footer">Dev by SALAH ⚡ | Refresh auto: 5s | Brainrots TTL: 60s</div>
 </div>
 
 <script>
 let currentFilter = 'all';
-let allBots = [];
+let searchTerm = '';
+let lastData = null;
 
-document.querySelectorAll('.filter-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-        document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        currentFilter = btn.dataset.filter;
-        renderBots();
+document.querySelectorAll('.filter-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        currentFilter = tab.dataset.filter;
+        if (lastData) renderBots(lastData.bots);
     });
 });
 
-document.getElementById('search').addEventListener('input', renderBots);
+document.getElementById('search').addEventListener('input', e => {
+    searchTerm = e.target.value.toLowerCase();
+    if (lastData) renderBots(lastData.bots);
+});
 
-function formatTime(seconds) {
-    if (seconds < 60) return seconds + 's';
-    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
-    return Math.floor(seconds / 3600) + 'h';
+function shortJobId(jobId) {
+    if (!jobId) return '-';
+    return jobId.substring(0, 12) + '...';
 }
 
-function renderBots() {
-    const search = document.getElementById('search').value.toLowerCase();
-    const filtered = allBots.filter(bot => {
-        if (search && !bot.botName.toLowerCase().includes(search)) return false;
-        if (currentFilter === 'active') return bot.isActive;
-        if (currentFilter === 'slow') return bot.isSlow;
-        if (currentFilter === 'dead') return bot.isDead;
-        return true;
+function renderStats(stats) {
+    document.getElementById('stat-total').textContent = stats.totalBots;
+    document.getElementById('stat-active').textContent = stats.active;
+    document.getElementById('stat-slow').textContent = stats.slow;
+    document.getElementById('stat-dead').textContent = stats.dead;
+    document.getElementById('stat-pool').textContent = stats.poolServers;
+    document.getElementById('stat-scans').textContent = stats.totalScans;
+    document.getElementById('stat-reports').textContent = stats.reportsReceived;
+}
+
+function renderBrainrots(brainrots) {
+    const section = document.getElementById('brainrots-section');
+    const list = document.getElementById('brainrots-list');
+    
+    if (!brainrots || brainrots.length === 0) {
+        section.style.display = 'none';
+        return;
+    }
+    
+    section.style.display = 'block';
+    list.innerHTML = '';
+    
+    brainrots.forEach(b => {
+        const remaining = b.remainingSeconds || 0;
+        let timerClass = 'fresh';
+        if (remaining < 20) timerClass = 'medium';
+        if (remaining < 10) timerClass = 'expiring';
+        
+        const widthPct = (remaining / 60) * 100;
+        
+        const item = document.createElement('div');
+        item.className = 'brainrot-item';
+        item.style.setProperty('--width', widthPct + '%');
+        
+        const mutationText = b.mutation && b.mutation !== 'None' ? \`[\${b.mutation}] \` : '';
+        
+        item.innerHTML = \`
+            <div class="brainrot-info">
+                <div class="brainrot-name">\${mutationText}\${b.name}</div>
+                <div class="brainrot-bot">par \${b.botName}</div>
+            </div>
+            <div class="brainrot-meta">
+                <div class="brainrot-money">\${b.money}</div>
+                <div class="brainrot-timer \${timerClass}">⏱ \${remaining}s</div>
+            </div>
+        \`;
+        
+        // Barre de progression visuelle
+        const bar = document.createElement('div');
+        bar.style.cssText = \`
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            height: 3px;
+            width: \${widthPct}%;
+            background: linear-gradient(90deg, #00ffaa, #ffaa00, #ff5555);
+            transition: width 1s linear;
+        \`;
+        item.appendChild(bar);
+        
+        list.appendChild(item);
     });
+}
+
+function renderBots(bots) {
+    const grid = document.getElementById('bots-grid');
+    grid.innerHTML = '';
     
-    const html = filtered.map(bot => {
-        const statusClass = bot.isDead ? 'dead' : (bot.isActive ? 'active' : 'slow');
-        const statusText = bot.isDead ? '💀 MORT' : (bot.isActive ? '✅ ACTIF' : '🟡 LENT');
-        const statusBg = bot.isDead ? 'status-dead' : (bot.isActive ? 'status-active' : 'status-slow');
-        
-        let brainrotHTML = '';
-        if (bot.lastBrainrot) {
-            brainrotHTML = '<div class="brainrot-info"><strong>' + bot.lastBrainrot.name + '</strong> - ' + bot.lastBrainrot.money + '</div>';
-        }
-        
-        return '<div class="bot-card ' + statusClass + '">' +
-            '<div class="bot-status ' + statusBg + '">' + statusText + '</div>' +
-            '<div class="bot-name">' + bot.botName + '</div>' +
-            '<div class="bot-info"><span>Serveurs scannés:</span><span>' + bot.serversVisited + '</span></div>' +
-            '<div class="bot-info"><span>Dernier hop:</span><span>' + formatTime(bot.lastVisitedAgo) + '</span></div>' +
-            (bot.currentJobId ? '<div class="bot-info"><span>JobID:</span><span>' + bot.currentJobId.substring(0, 12) + '...</span></div>' : '') +
-            brainrotHTML +
-        '</div>';
-    }).join('');
+    let filtered = bots;
+    if (currentFilter === 'active') filtered = bots.filter(b => b.isActive);
+    else if (currentFilter === 'slow') filtered = bots.filter(b => b.isSlow);
+    else if (currentFilter === 'dead') filtered = bots.filter(b => b.isDead);
     
-    document.getElementById('bots').innerHTML = html || '<p style="color:#8b8fb1;text-align:center;">Aucun bot trouvé</p>';
+    if (searchTerm) {
+        filtered = filtered.filter(b => b.botName.toLowerCase().includes(searchTerm));
+    }
+    
+    filtered.forEach(bot => {
+        let statusClass = 'active';
+        let statusText = '✅ ACTIF';
+        if (bot.isDead) { statusClass = 'dead'; statusText = '💀 MORT'; }
+        else if (bot.isSlow) { statusClass = 'slow'; statusText = '🟡 LENT'; }
+        
+        const card = document.createElement('div');
+        card.className = \`bot-card \${statusClass}\`;
+        
+        const brainrotHtml = bot.lastBrainrot && bot.lastBrainrot.numeric >= 20000000 ? \`
+            <div class="bot-brainrot">
+                <span class="name">\${bot.lastBrainrot.mutation && bot.lastBrainrot.mutation !== 'None' ? '[' + bot.lastBrainrot.mutation + '] ' : ''}\${bot.lastBrainrot.name}</span>
+                <span class="money"> - \${bot.lastBrainrot.money}</span>
+            </div>
+        \` : '';
+        
+        card.innerHTML = \`
+            <span class="bot-status \${statusClass}">\${statusText}</span>
+            <div class="bot-name">\${bot.botName}</div>
+            <div class="bot-stat"><span>Serveurs scannés:</span><span class="value">\${bot.jobsReceived}</span></div>
+            <div class="bot-stat"><span>Dernier hop:</span><span class="value">\${bot.lastSeenSeconds}s</span></div>
+            <div class="bot-stat"><span>JobID:</span><span class="value">\${shortJobId(bot.currentJobId)}</span></div>
+            \${brainrotHtml}
+        \`;
+        
+        grid.appendChild(card);
+    });
 }
 
 async function fetchData() {
     try {
-        const r = await fetch('/api/dashboard-data');
-        const d = await r.json();
+        const res = await fetch('/api/dashboard-data');
+        const data = await res.json();
+        lastData = data;
         
-        document.getElementById('stats').innerHTML = 
-            '<div class="stat-card"><div class="stat-label">Total Bots</div><div class="stat-value cyan">' + d.stats.totalBots + '</div></div>' +
-            '<div class="stat-card"><div class="stat-label">✅ Actifs</div><div class="stat-value green">' + d.stats.activeBots + '</div></div>' +
-            '<div class="stat-card"><div class="stat-label">🟡 Lents</div><div class="stat-value orange">' + d.stats.slowBots + '</div></div>' +
-            '<div class="stat-card"><div class="stat-label">💀 Morts</div><div class="stat-value red">' + d.stats.deadBots + '</div></div>' +
-            '<div class="stat-card"><div class="stat-label">Pool Serveurs</div><div class="stat-value purple">' + d.stats.poolSize + '</div></div>' +
-            '<div class="stat-card"><div class="stat-label">Total Scans</div><div class="stat-value cyan">' + d.stats.totalScans + '</div></div>' +
-            '<div class="stat-card"><div class="stat-label">Reports</div><div class="stat-value green">' + d.stats.reportsReceived + '</div></div>';
-        
-        if (d.recentBrainrots && d.recentBrainrots.length > 0) {
-            document.getElementById('brainrots').innerHTML = d.recentBrainrots.map(b => 
-                '<div class="brainrot-item">' +
-                    '<div><div class="brainrot-name">' + (b.mutation ? '[' + b.mutation + '] ' : '') + b.name + '</div>' +
-                    '<small style="color:#8b8fb1;">par ' + b.botName + '</small></div>' +
-                    '<div class="brainrot-value">' + b.money + '</div>' +
-                '</div>'
-            ).join('');
-        } else {
-            document.getElementById('brainrots').innerHTML = '<p style="color:#8b8fb1;text-align:center;">Aucun brainrot trouvé pour l\\'instant</p>';
-        }
-        
-        allBots = d.bots;
-        renderBots();
+        renderStats(data.stats);
+        renderBrainrots(data.recentBrainrots);
+        renderBots(data.bots);
     } catch (e) {
         console.error('Fetch error:', e);
     }
@@ -724,23 +833,42 @@ async function fetchData() {
 
 fetchData();
 setInterval(fetchData, 5000);
+
+// Update timers locally chaque seconde (ne pas attendre le fetch)
+setInterval(() => {
+    if (!lastData || !lastData.recentBrainrots) return;
+    
+    document.querySelectorAll('.brainrot-timer').forEach((el, i) => {
+        const b = lastData.recentBrainrots[i];
+        if (!b) return;
+        const elapsedSinceFetch = (Date.now() - lastData._fetchedAt) / 1000;
+        const newRemaining = Math.max(0, b.remainingSeconds - Math.floor(elapsedSinceFetch));
+        el.textContent = '⏱ ' + newRemaining + 's';
+    });
+}, 1000);
+
+// Mark fetch time
+const origFetch = fetchData;
+fetchData = async function() {
+    await origFetch();
+    if (lastData) lastData._fetchedAt = Date.now();
+};
 </script>
 </body>
-</html>`;
-}
+</html>`);
+});
 
 // ═══════════════════════════════════════════════════════════════
-//                    START
+// START
 // ═══════════════════════════════════════════════════════════════
-
 app.listen(PORT, () => {
-    console.log(`🚀 JobID Scanner running on port ${PORT}`);
-    console.log(`📊 Smart Distribution + Dashboard actif:`);
-    console.log(`   - Lock JobID: ${JOBID_LOCK_TTL / 1000}s`);
-    console.log(`   - History bot: ${BOT_HISTORY_TTL / 3600 / 1000}h`);
-    console.log(`   - Cible: ${MIN_PLAYERS}-${MAX_PLAYERS} joueurs/8`);
-    console.log(`   - Scan: toutes les ${SCAN_INTERVAL / 1000}s`);
-    console.log(`   - Dashboard: /dashboard`);
+    console.log('═══════════════════════════════════════════════');
+    console.log('🚀 JobID Scanner v3 - Brainrots TTL 60s');
+    console.log('═══════════════════════════════════════════════');
+    console.log(`Port: ${PORT}`);
+    console.log(`API Key: ${API_KEY}`);
+    console.log(`Dashboard: /dashboard`);
+    console.log('═══════════════════════════════════════════════');
     
-    scannerLoop();
+    scanLoop();
 });
