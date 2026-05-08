@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════
 // 🚀 JOBID SCANNER + REPORTS + LOGS + DASHBOARD - Railway
-// Dev by SALAH ⚡ | v3.4 - Fix Pool + Live Logs
+// Dev by SALAH ⚡ | v3.5 - Que serveurs 7/8 (excludeFullGames)
 // ═══════════════════════════════════════════════════════════════
 
 const express = require('express');
@@ -16,20 +16,21 @@ const POOL_CONFIG = {
     rebirth1plus: { placeId: 109983668079237, label: 'Rebirth 1+' }
 };
 
-const MIN_PLAYERS = 3;       // ✅ Élargi: 3 au lieu de 6
-const MAX_PLAYERS = 7;
+// ✅ CONFIG MODIFIEE: Que des serveurs 7/8 (presque pleins)
+const MIN_PLAYERS = 7;       // Au moins 7 joueurs
+const MAX_PLAYERS = 7;       // Max 7 (pour laisser 1 place au bot)
 const SCAN_INTERVAL = 15000;
-const MAX_PAGES = 10;
+const MAX_PAGES = 30;        // ✅ Scanner 30 pages = 3000 serveurs
 const JOBID_LOCK_TTL = 90 * 1000;
 const BOT_HISTORY_TTL = 6 * 60 * 60 * 1000;
 const BRAINROT_TTL = 60 * 1000;
 const MAX_LOGS = 200;
 
-// ✅ Liste de proxies (essaie en cascade si un est down)
+// ✅ Liste de proxies (cascade fallback)
 const PROXIES = [
+    'https://roblox-proxy.salahelarabi03.workers.dev',
     'https://games.roproxy.com',
-    'https://games.roblox.com',
-    'https://roblox-proxy.salahelarabi03.workers.dev'
+    'https://games.roblox.com'
 ];
 
 const pools = {
@@ -81,10 +82,11 @@ function cleanupExpired() {
 setInterval(cleanupExpired, 5000);
 
 // ═══════════════════════════════════════════════════════════════
-// ✅ FETCH SERVERS avec multi-proxy fallback
+// ✅ FETCH SERVERS avec excludeFullGames + multi-proxy fallback
 // ═══════════════════════════════════════════════════════════════
 async function fetchServers(placeId, cursor) {
-    const path = '/v1/games/' + placeId + '/servers/Public?limit=100' + (cursor ? '&cursor=' + cursor : '');
+    // ✅ NOUVEAU: excludeFullGames=true pour exclure les 8/8
+    const path = '/v1/games/' + placeId + '/servers/Public?limit=100&excludeFullGames=true' + (cursor ? '&cursor=' + cursor : '');
     
     for (const proxy of PROXIES) {
         const url = proxy + path;
@@ -142,7 +144,7 @@ async function scanPool(poolKey) {
     
     pools[poolKey] = newPool;
     stats.totalScans++;
-    console.log('[SCAN] ' + config.label + ': ' + newPool.length + ' serveurs');
+    console.log('[SCAN] ' + config.label + ': ' + newPool.length + ' serveurs 7/8');
 }
 
 async function scanLoop() {
@@ -166,7 +168,12 @@ async function scanLoop() {
 app.get('/', (req, res) => {
     res.json({
         name: 'JobID Scanner + Logs',
-        version: '3.4',
+        version: '3.5',
+        config: {
+            players: MIN_PLAYERS + '-' + MAX_PLAYERS,
+            maxPages: MAX_PAGES,
+            excludeFullGames: true
+        },
         endpoints: ['/health', '/jobs', '/report-data', '/log', '/stats', '/bots', '/dashboard', '/api/dashboard-data', '/api/logs']
     });
 });
@@ -520,13 +527,13 @@ app.get('/dashboard', (req, res) => {
 '.footer{text-align:center;margin-top:30px;color:#555;font-size:11px;}' +
 '</style></head><body>' +
 '<div class="container">' +
-'<div class="header"><h1>FLASH NOTIFIER PRO</h1><div class="subtitle">BOT MONITOR DASHBOARD - LIVE LOGS</div></div>' +
+'<div class="header"><h1>FLASH NOTIFIER PRO</h1><div class="subtitle">BOT MONITOR DASHBOARD - LIVE LOGS - 7/8 ONLY</div></div>' +
 '<div class="stats-grid">' +
 '<div class="stat-card total"><div class="stat-label">TOTAL BOTS</div><div class="stat-value" id="stat-total">0</div></div>' +
 '<div class="stat-card active"><div class="stat-label">ACTIFS</div><div class="stat-value" id="stat-active">0</div></div>' +
 '<div class="stat-card slow"><div class="stat-label">LENTS</div><div class="stat-value" id="stat-slow">0</div></div>' +
 '<div class="stat-card dead"><div class="stat-label">MORTS</div><div class="stat-value" id="stat-dead">0</div></div>' +
-'<div class="stat-card pool"><div class="stat-label">POOL</div><div class="stat-value" id="stat-pool">0</div></div>' +
+'<div class="stat-card pool"><div class="stat-label">POOL 7/8</div><div class="stat-value" id="stat-pool">0</div></div>' +
 '<div class="stat-card scans"><div class="stat-label">SCANS</div><div class="stat-value" id="stat-scans">0</div></div>' +
 '<div class="stat-card reports"><div class="stat-label">REPORTS</div><div class="stat-value" id="stat-reports">0</div></div>' +
 '<div class="stat-card logs"><div class="stat-label">LOGS</div><div class="stat-value" id="stat-logs">0</div></div>' +
@@ -539,7 +546,7 @@ app.get('/dashboard', (req, res) => {
 '<input type="text" class="search-bar" id="search" placeholder="Rechercher...">' +
 '<div class="filter-tabs"><div class="filter-tab active" data-filter="all">Tous</div><div class="filter-tab" data-filter="active">✅ Actifs</div><div class="filter-tab" data-filter="slow">🟡 Lents</div><div class="filter-tab" data-filter="dead">💀 Morts</div></div>' +
 '<div class="bots-grid" id="bots-grid"></div></div>' +
-'<div class="footer">Dev by SALAH ⚡ | Refresh: 5s | Logs: 2s</div>' +
+'<div class="footer">Dev by SALAH ⚡ | Refresh: 5s | Logs: 2s | Que serveurs 7/8</div>' +
 '</div>' +
 '<script>' +
 'var currentFilter="all",searchTerm="",lastData=null,logsPaused=false,logsFilter="";' +
@@ -566,10 +573,11 @@ app.get('/dashboard', (req, res) => {
 
 app.listen(PORT, () => {
     console.log('===============================================');
-    console.log('JobID Scanner v3.4 - Multi-Proxy + Live Logs');
+    console.log('JobID Scanner v3.5 - 7/8 ONLY + excludeFullGames');
     console.log('===============================================');
     console.log('Port: ' + PORT);
-    console.log('Min/Max players: ' + MIN_PLAYERS + '-' + MAX_PLAYERS);
+    console.log('Players: ' + MIN_PLAYERS + '-' + MAX_PLAYERS);
+    console.log('Pages scan: ' + MAX_PAGES);
     console.log('Proxies: ' + PROXIES.length);
     console.log('===============================================');
     
