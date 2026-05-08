@@ -17,8 +17,8 @@ const POOL_CONFIG = {
 };
 
 // ✅ CONFIG MODIFIEE: Que des serveurs 7/8 (presque pleins)
-const MIN_PLAYERS = 7;       // Au moins 7 joueurs
-const MAX_PLAYERS = 7;       // Max 7 (pour laisser 1 place au bot)
+const MIN_PLAYERS = 5;       // ✅ 5, 6 ou 7 joueurs (plus de marge)
+const MAX_PLAYERS = 7;       // ✅ Pas plein
 const SCAN_INTERVAL = 15000;
 const MAX_PAGES = 30;        // ✅ Scanner 30 pages = 3000 serveurs
 const JOBID_LOCK_TTL = 90 * 1000;
