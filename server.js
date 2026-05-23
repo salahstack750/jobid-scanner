@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════
-// 🚀 JOBID SCANNER + REPORTS + LOGS + DASHBOARD - Railway
-// Dev by SALAH ⚡ | v3.5 - Que serveurs 7/8 (excludeFullGames)
+// 🦖 GODZILLA NOTIFIER - Railway Backend
+// Modified by SALAH ⚡ | v4.0 - Dashboard Ultra Simple + 30s TTL
 // ═══════════════════════════════════════════════════════════════
 
 const express = require('express');
@@ -16,14 +16,14 @@ const POOL_CONFIG = {
     rebirth1plus: { placeId: 109983668079237, label: 'Rebirth 1+' }
 };
 
-// ✅ CONFIG MODIFIEE: Que des serveurs 7/8 (presque pleins)
-const MIN_PLAYERS = 5;       // ✅ 5, 6 ou 7 joueurs (plus de marge)
-const MAX_PLAYERS = 7;       // ✅ Pas plein
+// ✅ CONFIG MODIFIEE
+const MIN_PLAYERS = 5;
+const MAX_PLAYERS = 7;
 const SCAN_INTERVAL = 15000;
-const MAX_PAGES = 30;        // ✅ Scanner 30 pages = 3000 serveurs
+const MAX_PAGES = 30;
 const JOBID_LOCK_TTL = 90 * 1000;
 const BOT_HISTORY_TTL = 6 * 60 * 60 * 1000;
-const BRAINROT_TTL = 60 * 1000;
+const BRAINROT_TTL = 30 * 1000;  // ✅ MODIFIÉ: 30 secondes au lieu de 60
 const MAX_LOGS = 200;
 
 // ✅ Liste de proxies (cascade fallback)
@@ -85,7 +85,6 @@ setInterval(cleanupExpired, 5000);
 // ✅ FETCH SERVERS avec excludeFullGames + multi-proxy fallback
 // ═══════════════════════════════════════════════════════════════
 async function fetchServers(placeId, cursor) {
-    // ✅ NOUVEAU: excludeFullGames=true pour exclure les 8/8
     const path = '/v1/games/' + placeId + '/servers/Public?limit=100&excludeFullGames=true' + (cursor ? '&cursor=' + cursor : '');
     
     for (const proxy of PROXIES) {
@@ -144,7 +143,7 @@ async function scanPool(poolKey) {
     
     pools[poolKey] = newPool;
     stats.totalScans++;
-    console.log('[SCAN] ' + config.label + ': ' + newPool.length + ' serveurs 7/8');
+    console.log('[SCAN] ' + config.label + ': ' + newPool.length + ' serveurs');
 }
 
 async function scanLoop() {
@@ -167,14 +166,15 @@ async function scanLoop() {
 
 app.get('/', (req, res) => {
     res.json({
-        name: 'JobID Scanner + Logs',
-        version: '3.5',
+        name: 'Godzilla Notifier Backend',
+        version: '4.0',
         config: {
             players: MIN_PLAYERS + '-' + MAX_PLAYERS,
             maxPages: MAX_PAGES,
-            excludeFullGames: true
+            excludeFullGames: true,
+            brainrotTTL: BRAINROT_TTL / 1000 + 's'
         },
-        endpoints: ['/health', '/jobs', '/report-data', '/log', '/stats', '/bots', '/dashboard', '/api/dashboard-data', '/api/logs']
+        endpoints: ['/health', '/jobs', '/report-data', '/log', '/stats', '/bots', '/dashboard', '/api/brainrots']
     });
 });
 
@@ -272,7 +272,8 @@ app.post('/report-data', (req, res) => {
         receivedAt: Date.now()
     });
     
-    if (numeric >= 40000000 && name) {
+    // ✅ Ajoute les brainrots à la liste (seuil à 0 pour tout capturer en test)
+    if (numeric >= 0 && name) {
         const now = Date.now();
         recentBrainrots.unshift({
             botName: botName,
@@ -367,57 +368,14 @@ app.get('/pool', (req, res) => {
     res.json(pools);
 });
 
-app.get('/api/logs', (req, res) => {
-    const filter = (req.query.bot || '').toLowerCase();
-    const limit = parseInt(req.query.limit) || 100;
-    
-    let logs = liveLogs;
-    if (filter) {
-        logs = logs.filter(l => l.botName.toLowerCase().includes(filter) || l.message.toLowerCase().includes(filter));
-    }
-    
-    res.json(logs.slice(0, limit));
-});
-
-app.get('/api/dashboard-data', (req, res) => {
+// ✅ NOUVEAU: API brainrots uniquement
+app.get('/api/brainrots', (req, res) => {
     const now = Date.now();
+    const active = [];
     
-    let active = 0;
-    let slow = 0;
-    let dead = 0;
-    const bots = [];
-    
-    for (const [botName, data] of botHistory.entries()) {
-        const report = reports.get(botName);
-        const sinceLastJob = (now - data.lastSeen) / 1000;
-        
-        const isActive = sinceLastJob < 30;
-        const isSlow = sinceLastJob >= 30 && sinceLastJob < 300;
-        const isDead = sinceLastJob >= 300;
-        
-        if (isActive) active++;
-        else if (isSlow) slow++;
-        else dead++;
-        
-        bots.push({
-            botName: botName,
-            jobsReceived: data.jobsReceived,
-            currentJobId: data.currentJobId,
-            lastSeenSeconds: Math.floor(sinceLastJob),
-            isActive: isActive,
-            isSlow: isSlow,
-            isDead: isDead,
-            lastBrainrot: report ? report.lastBrainrot : null,
-            players: report ? report.players : null
-        });
-    }
-    
-    bots.sort((a, b) => b.jobsReceived - a.jobsReceived);
-    
-    const activeBrainrots = [];
     for (const b of recentBrainrots) {
         if (b.expiresAt > now) {
-            activeBrainrots.push({
+            active.push({
                 botName: b.botName,
                 jobId: b.jobId,
                 name: b.name,
@@ -429,156 +387,252 @@ app.get('/api/dashboard-data', (req, res) => {
         }
     }
     
-    res.json({
-        stats: {
-            totalBots: botHistory.size,
-            active: active,
-            slow: slow,
-            dead: dead,
-            poolServers: pools.rebirth0.length + pools.rebirth1plus.length,
-            totalScans: stats.totalScans,
-            reportsReceived: stats.reportsReceived,
-            logsReceived: stats.logsReceived
-        },
-        bots: bots,
-        recentBrainrots: activeBrainrots
-    });
+    res.json(active);
 });
 
 // ═══════════════════════════════════════════════════════════════
-// DASHBOARD HTML
+// 🦖 DASHBOARD ULTRA SIMPLE - BRAINROTS UNIQUEMENT
 // ═══════════════════════════════════════════════════════════════
 app.get('/dashboard', (req, res) => {
     res.setHeader('Content-Type', 'text/html');
     
-    const html = '<!DOCTYPE html>' +
-'<html lang="fr"><head><meta charset="UTF-8">' +
-'<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
-'<title>Flash Notifier Pro</title>' +
-'<style>' +
-'*{margin:0;padding:0;box-sizing:border-box;}' +
-'body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:linear-gradient(135deg,#0a0e1a,#1a1f2e);color:#fff;min-height:100vh;padding:20px;}' +
-'.container{max-width:1400px;margin:0 auto;}' +
-'.header{text-align:center;margin-bottom:30px;}' +
-'.header h1{font-size:36px;background:linear-gradient(90deg,#00d4ff,#00ffaa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-weight:900;}' +
-'.header .subtitle{color:#00ffaa;margin-top:5px;font-size:12px;}' +
-'.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:25px;}' +
-'.stat-card{background:rgba(20,30,50,0.6);border:1px solid rgba(100,150,255,0.2);border-radius:12px;padding:16px;text-align:center;}' +
-'.stat-label{font-size:10px;text-transform:uppercase;color:#888;margin-bottom:6px;letter-spacing:1px;}' +
-'.stat-value{font-size:28px;font-weight:900;}' +
-'.stat-card.total .stat-value{color:#00d4ff;}' +
-'.stat-card.active .stat-value{color:#00ffaa;}' +
-'.stat-card.slow .stat-value{color:#ffaa00;}' +
-'.stat-card.dead .stat-value{color:#ff5555;}' +
-'.stat-card.pool .stat-value{color:#aa55ff;}' +
-'.stat-card.scans .stat-value{color:#00aaff;}' +
-'.stat-card.reports .stat-value{color:#00ff77;}' +
-'.stat-card.logs .stat-value{color:#ffd700;}' +
-'.section{background:rgba(20,30,50,0.4);border:1px solid rgba(100,150,255,0.2);border-radius:12px;padding:20px;margin-bottom:20px;}' +
-'.section-title{font-size:18px;font-weight:700;color:#00d4ff;margin-bottom:15px;}' +
-'.brainrot-item{background:rgba(0,60,80,0.3);border-left:3px solid #00d4ff;border-radius:6px;padding:10px 14px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;position:relative;overflow:hidden;}' +
-'.brainrot-info{flex:1;}' +
-'.brainrot-name{font-size:13px;font-weight:700;color:#00d4ff;}' +
-'.brainrot-bot{font-size:11px;color:#888;margin-top:2px;}' +
-'.brainrot-meta{display:flex;align-items:center;gap:10px;}' +
-'.brainrot-money{font-size:15px;font-weight:900;color:#00ff77;}' +
-'.brainrot-timer{font-size:12px;font-weight:700;background:rgba(0,0,0,0.4);padding:3px 8px;border-radius:12px;min-width:50px;text-align:center;}' +
-'.brainrot-timer.fresh{color:#00ffaa;}' +
-'.brainrot-timer.medium{color:#ffaa00;}' +
-'.brainrot-timer.expiring{color:#ff5555;animation:pulse 0.5s infinite;}' +
-'.brainrot-progress{position:absolute;bottom:0;left:0;height:3px;background:linear-gradient(90deg,#00ffaa,#ffaa00,#ff5555);transition:width 1s linear;}' +
-'@keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.5;}}' +
-'.search-bar{width:100%;background:rgba(10,15,25,0.6);border:1px solid rgba(100,150,255,0.3);border-radius:8px;padding:10px 15px;color:#fff;margin-bottom:12px;font-size:13px;}' +
-'.filter-tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;}' +
-'.filter-tab{background:rgba(10,15,25,0.6);border:1px solid rgba(100,150,255,0.3);border-radius:8px;padding:6px 14px;color:#aaa;cursor:pointer;font-size:12px;font-weight:600;}' +
-'.filter-tab.active{background:#00d4ff;color:#0a0e1a;border-color:#00d4ff;}' +
-'.bots-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;}' +
-'.bot-card{background:rgba(15,25,45,0.6);border-left:4px solid #444;border-radius:8px;padding:12px;}' +
-'.bot-card.active{border-left-color:#00ffaa;}' +
-'.bot-card.slow{border-left-color:#ffaa00;}' +
-'.bot-card.dead{border-left-color:#ff5555;opacity:0.6;}' +
-'.bot-status{font-size:9px;font-weight:700;padding:2px 7px;border-radius:4px;display:inline-block;margin-bottom:6px;}' +
-'.bot-status.active{background:#00ffaa;color:#0a0e1a;}' +
-'.bot-status.slow{background:#ffaa00;color:#0a0e1a;}' +
-'.bot-status.dead{background:#ff5555;color:#fff;}' +
-'.bot-name{font-weight:700;font-size:13px;margin-bottom:6px;cursor:pointer;}' +
-'.bot-name:hover{color:#00d4ff;}' +
-'.bot-stat{display:flex;justify-content:space-between;font-size:11px;color:#aaa;padding:1px 0;}' +
-'.bot-stat .value{color:#fff;font-weight:600;}' +
-'.bot-brainrot{margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.1);font-size:11px;}' +
-'.bot-brainrot .name{color:#00d4ff;font-weight:700;}' +
-'.bot-brainrot .money{color:#00ff77;}' +
-'.logs-container{background:#000;border-radius:8px;padding:12px;max-height:500px;overflow-y:auto;font-family:"Courier New",monospace;font-size:12px;}' +
-'.log-entry{padding:4px 8px;border-radius:4px;margin-bottom:2px;display:flex;gap:10px;align-items:flex-start;}' +
-'.log-entry:hover{background:rgba(255,255,255,0.05);}' +
-'.log-time{color:#666;flex-shrink:0;min-width:60px;}' +
-'.log-bot{color:#ffd700;font-weight:700;flex-shrink:0;min-width:120px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +
-'.log-level{flex-shrink:0;min-width:50px;font-weight:700;}' +
-'.log-level.INFO{color:#00d4ff;}' +
-'.log-level.WARN{color:#ffaa00;}' +
-'.log-level.ERROR{color:#ff5555;}' +
-'.log-message{color:#fff;flex:1;word-break:break-word;}' +
-'.logs-controls{display:flex;gap:8px;margin-bottom:10px;align-items:center;}' +
-'.logs-search{flex:1;background:rgba(10,15,25,0.6);border:1px solid rgba(100,150,255,0.3);border-radius:6px;padding:6px 10px;color:#fff;font-size:12px;}' +
-'.logs-clear{background:#ff5555;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px;font-weight:700;}' +
-'.logs-pause{background:#ffaa00;color:#0a0e1a;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px;font-weight:700;}' +
-'.logs-pause.active{background:#00ffaa;}' +
-'.logs-empty{color:#666;text-align:center;padding:20px;}' +
-'.footer{text-align:center;margin-top:30px;color:#555;font-size:11px;}' +
-'</style></head><body>' +
-'<div class="container">' +
-'<div class="header"><h1>FLASH NOTIFIER PRO</h1><div class="subtitle">BOT MONITOR DASHBOARD - LIVE LOGS - 7/8 ONLY</div></div>' +
-'<div class="stats-grid">' +
-'<div class="stat-card total"><div class="stat-label">TOTAL BOTS</div><div class="stat-value" id="stat-total">0</div></div>' +
-'<div class="stat-card active"><div class="stat-label">ACTIFS</div><div class="stat-value" id="stat-active">0</div></div>' +
-'<div class="stat-card slow"><div class="stat-label">LENTS</div><div class="stat-value" id="stat-slow">0</div></div>' +
-'<div class="stat-card dead"><div class="stat-label">MORTS</div><div class="stat-value" id="stat-dead">0</div></div>' +
-'<div class="stat-card pool"><div class="stat-label">POOL 7/8</div><div class="stat-value" id="stat-pool">0</div></div>' +
-'<div class="stat-card scans"><div class="stat-label">SCANS</div><div class="stat-value" id="stat-scans">0</div></div>' +
-'<div class="stat-card reports"><div class="stat-label">REPORTS</div><div class="stat-value" id="stat-reports">0</div></div>' +
-'<div class="stat-card logs"><div class="stat-label">LOGS</div><div class="stat-value" id="stat-logs">0</div></div>' +
-'</div>' +
-'<div class="section"><div class="section-title">📜 Live Logs</div>' +
-'<div class="logs-controls"><input type="text" class="logs-search" id="logs-search" placeholder="🔍 Filtrer..."><button class="logs-pause" id="logs-pause">⏸️ Pause</button><button class="logs-clear" id="logs-clear">🗑️ Clear</button></div>' +
-'<div class="logs-container" id="logs-container"><div class="logs-empty">En attente...</div></div></div>' +
-'<div class="section" id="brainrots-section" style="display:none;"><div class="section-title">💎 Brainrots (60s)</div><div id="brainrots-list"></div></div>' +
-'<div class="section"><div class="section-title">🤖 Liste des Bots</div>' +
-'<input type="text" class="search-bar" id="search" placeholder="Rechercher...">' +
-'<div class="filter-tabs"><div class="filter-tab active" data-filter="all">Tous</div><div class="filter-tab" data-filter="active">✅ Actifs</div><div class="filter-tab" data-filter="slow">🟡 Lents</div><div class="filter-tab" data-filter="dead">💀 Morts</div></div>' +
-'<div class="bots-grid" id="bots-grid"></div></div>' +
-'<div class="footer">Dev by SALAH ⚡ | Refresh: 5s | Logs: 2s | Que serveurs 7/8</div>' +
-'</div>' +
-'<script>' +
-'var currentFilter="all",searchTerm="",lastData=null,logsPaused=false,logsFilter="";' +
-'document.querySelectorAll(".filter-tab").forEach(function(tab){tab.addEventListener("click",function(){document.querySelectorAll(".filter-tab").forEach(function(t){t.classList.remove("active");});tab.classList.add("active");currentFilter=tab.dataset.filter;if(lastData)renderBots(lastData.bots);});});' +
-'document.getElementById("search").addEventListener("input",function(e){searchTerm=e.target.value.toLowerCase();if(lastData)renderBots(lastData.bots);});' +
-'document.getElementById("logs-search").addEventListener("input",function(e){logsFilter=e.target.value.toLowerCase();fetchLogs();});' +
-'document.getElementById("logs-pause").addEventListener("click",function(){logsPaused=!logsPaused;this.classList.toggle("active");this.textContent=logsPaused?"▶️ Resume":"⏸️ Pause";});' +
-'document.getElementById("logs-clear").addEventListener("click",function(){document.getElementById("logs-container").innerHTML="<div class=\\"logs-empty\\">Effacé</div>";});' +
-'function shortJobId(j){if(!j)return"-";return j.substring(0,12)+"...";}' +
-'function formatTime(ts){return new Date(ts).toLocaleTimeString("fr-FR",{hour12:false});}' +
-'function renderStats(s){document.getElementById("stat-total").textContent=s.totalBots;document.getElementById("stat-active").textContent=s.active;document.getElementById("stat-slow").textContent=s.slow;document.getElementById("stat-dead").textContent=s.dead;document.getElementById("stat-pool").textContent=s.poolServers;document.getElementById("stat-scans").textContent=s.totalScans;document.getElementById("stat-reports").textContent=s.reportsReceived;document.getElementById("stat-logs").textContent=s.logsReceived||0;}' +
-'function renderBrainrots(brs){var section=document.getElementById("brainrots-section"),list=document.getElementById("brainrots-list");if(!brs||brs.length===0){section.style.display="none";return;}section.style.display="block";list.innerHTML="";brs.forEach(function(b){var r=b.remainingSeconds||0,tc="fresh";if(r<20)tc="medium";if(r<10)tc="expiring";var w=(r/60)*100,it=document.createElement("div");it.className="brainrot-item";it.dataset.expiresAt=Date.now()+(r*1000);var mt=b.mutation&&b.mutation!=="None"?"["+b.mutation+"] ":"";it.innerHTML="<div class=\\"brainrot-info\\"><div class=\\"brainrot-name\\">"+mt+b.name+"</div><div class=\\"brainrot-bot\\">par "+b.botName+"</div></div><div class=\\"brainrot-meta\\"><div class=\\"brainrot-money\\">"+b.money+"</div><div class=\\"brainrot-timer "+tc+"\\">"+r+"s</div></div><div class=\\"brainrot-progress\\" style=\\"width:"+w+"%\\"></div>";list.appendChild(it);});}' +
-'function renderBots(bots){var grid=document.getElementById("bots-grid");grid.innerHTML="";var f=bots;if(currentFilter==="active")f=bots.filter(function(b){return b.isActive;});else if(currentFilter==="slow")f=bots.filter(function(b){return b.isSlow;});else if(currentFilter==="dead")f=bots.filter(function(b){return b.isDead;});if(searchTerm)f=f.filter(function(b){return b.botName.toLowerCase().indexOf(searchTerm)!==-1;});f.forEach(function(b){var sc="active",st="ACTIF";if(b.isDead){sc="dead";st="MORT";}else if(b.isSlow){sc="slow";st="LENT";}var c=document.createElement("div");c.className="bot-card "+sc;var bh="";if(b.lastBrainrot&&b.lastBrainrot.numeric>=20000000){var m=b.lastBrainrot.mutation&&b.lastBrainrot.mutation!=="None"?"["+b.lastBrainrot.mutation+"] ":"";bh="<div class=\\"bot-brainrot\\"><span class=\\"name\\">"+m+b.lastBrainrot.name+"</span><span class=\\"money\\"> - "+b.lastBrainrot.money+"</span></div>";}c.innerHTML="<span class=\\"bot-status "+sc+"\\">"+st+"</span><div class=\\"bot-name\\" onclick=\\"filterLogsByBot(\\\'"+b.botName+"\\\')\\">"+b.botName+"</div><div class=\\"bot-stat\\"><span>Scans:</span><span class=\\"value\\">"+b.jobsReceived+"</span></div><div class=\\"bot-stat\\"><span>Last hop:</span><span class=\\"value\\">"+b.lastSeenSeconds+"s</span></div><div class=\\"bot-stat\\"><span>JobID:</span><span class=\\"value\\">"+shortJobId(b.currentJobId)+"</span></div>"+bh;grid.appendChild(c);});}' +
-'function filterLogsByBot(n){document.getElementById("logs-search").value=n;logsFilter=n.toLowerCase();fetchLogs();}' +
-'function renderLogs(logs){if(logsPaused)return;var c=document.getElementById("logs-container");if(!logs||logs.length===0){c.innerHTML="<div class=\\"logs-empty\\">En attente...</div>";return;}c.innerHTML="";logs.forEach(function(l){var e=document.createElement("div");e.className="log-entry";var m=l.message.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");e.innerHTML="<span class=\\"log-time\\">"+formatTime(l.timestamp)+"</span><span class=\\"log-bot\\">"+l.botName+"</span><span class=\\"log-level "+l.level+"\\">"+l.level+"</span><span class=\\"log-message\\">"+m+"</span>";c.appendChild(e);});}' +
-'function fetchData(){fetch("/api/dashboard-data").then(function(r){return r.json();}).then(function(d){lastData=d;renderStats(d.stats);renderBrainrots(d.recentBrainrots);renderBots(d.bots);}).catch(function(e){});}' +
-'function fetchLogs(){if(logsPaused)return;var u="/api/logs?limit=100";if(logsFilter)u+="&bot="+encodeURIComponent(logsFilter);fetch(u).then(function(r){return r.json();}).then(function(l){renderLogs(l);}).catch(function(e){});}' +
-'fetchData();fetchLogs();setInterval(fetchData,5000);setInterval(fetchLogs,2000);' +
-'setInterval(function(){document.querySelectorAll(".brainrot-item").forEach(function(it){var ea=parseInt(it.dataset.expiresAt);if(!ea)return;var r=Math.max(0,Math.ceil((ea-Date.now())/1000)),te=it.querySelector(".brainrot-timer"),pe=it.querySelector(".brainrot-progress");if(te){te.textContent=r+"s";te.className="brainrot-timer "+(r<10?"expiring":r<20?"medium":"fresh");}if(pe)pe.style.width=((r/60)*100)+"%";if(r<=0)it.style.display="none";});},1000);' +
-'</script></body></html>';
+    const html = `<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🦖 Godzilla Notifier</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{
+    font-family:'Courier New',monospace;
+    background:#0a0a0a;
+    color:#00ff00;
+    min-height:100vh;
+    padding:20px;
+}
+.container{
+    max-width:900px;
+    margin:0 auto;
+}
+.header{
+    text-align:center;
+    margin-bottom:30px;
+    padding:20px;
+    border:2px solid #00ff00;
+    background:rgba(0,255,0,0.05);
+}
+.header h1{
+    font-size:32px;
+    color:#00ff00;
+    text-shadow:0 0 10px #00ff00;
+    margin-bottom:5px;
+}
+.header .subtitle{
+    font-size:12px;
+    color:#00aa00;
+    opacity:0.8;
+}
+.empty{
+    text-align:center;
+    padding:60px 20px;
+    color:#006600;
+    font-size:16px;
+    border:1px dashed #006600;
+    background:rgba(0,255,0,0.02);
+}
+.brainrot-list{
+    display:flex;
+    flex-direction:column;
+    gap:12px;
+}
+.brainrot-card{
+    background:rgba(0,255,0,0.05);
+    border:1px solid #00ff00;
+    border-radius:8px;
+    padding:16px;
+    position:relative;
+    overflow:hidden;
+    transition:all 0.3s ease;
+}
+.brainrot-card:hover{
+    background:rgba(0,255,0,0.1);
+    box-shadow:0 0 20px rgba(0,255,0,0.3);
+}
+.brainrot-header{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    margin-bottom:10px;
+}
+.brainrot-name{
+    font-size:18px;
+    font-weight:bold;
+    color:#00ff00;
+}
+.brainrot-value{
+    font-size:20px;
+    font-weight:bold;
+    color:#00ff00;
+    text-shadow:0 0 5px #00ff00;
+}
+.brainrot-meta{
+    display:flex;
+    gap:20px;
+    font-size:13px;
+    color:#00aa00;
+}
+.brainrot-meta span{
+    display:flex;
+    align-items:center;
+    gap:5px;
+}
+.brainrot-timer{
+    position:absolute;
+    top:8px;
+    right:8px;
+    background:rgba(0,0,0,0.6);
+    padding:4px 10px;
+    border-radius:12px;
+    font-size:14px;
+    font-weight:bold;
+}
+.timer-fresh{color:#00ff00;}
+.timer-medium{color:#ffaa00;}
+.timer-expiring{color:#ff5555;animation:pulse 0.5s infinite;}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.5;}}
+.brainrot-progress{
+    position:absolute;
+    bottom:0;
+    left:0;
+    height:3px;
+    background:linear-gradient(90deg,#00ff00,#ffaa00,#ff5555);
+    transition:width 1s linear;
+}
+.footer{
+    text-align:center;
+    margin-top:30px;
+    padding:15px;
+    color:#006600;
+    font-size:11px;
+    border-top:1px solid #006600;
+}
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>🦖 GODZILLA NOTIFIER</h1>
+        <div class="subtitle">BRAINROTS LIVE - TTL 30 SECONDES</div>
+    </div>
+    
+    <div id="brainrots-container">
+        <div class="empty">En attente de brainrots...</div>
+    </div>
+    
+    <div class="footer">
+        Dev by SALAH ⚡ | Auto-refresh: 1s | Scan expire: 30s
+    </div>
+</div>
+
+<script>
+function formatMoney(money) {
+    return money || '$0';
+}
+
+function renderBrainrots(brainrots) {
+    const container = document.getElementById('brainrots-container');
+    
+    if (!brainrots || brainrots.length === 0) {
+        container.innerHTML = '<div class="empty">En attente de brainrots...</div>';
+        return;
+    }
+    
+    const list = document.createElement('div');
+    list.className = 'brainrot-list';
+    
+    brainrots.forEach(b => {
+        const remaining = b.remainingSeconds || 0;
+        const timerClass = remaining < 10 ? 'timer-expiring' : remaining < 20 ? 'timer-medium' : 'timer-fresh';
+        const progressWidth = (remaining / 30) * 100;
+        
+        const card = document.createElement('div');
+        card.className = 'brainrot-card';
+        card.dataset.expiresAt = Date.now() + (remaining * 1000);
+        
+        const mutationTag = b.mutation && b.mutation !== 'None' ? '[' + b.mutation + ']' : '';
+        
+        card.innerHTML = \`
+            <div class="brainrot-timer \${timerClass}">\${remaining}s</div>
+            <div class="brainrot-header">
+                <div class="brainrot-name">\${mutationTag} \${b.name}</div>
+                <div class="brainrot-value">\${formatMoney(b.money)}</div>
+            </div>
+            <div class="brainrot-meta">
+                <span>🤖 \${b.botName}</span>
+                <span>🎮 JobID: \${b.jobId.substring(0, 12)}...</span>
+            </div>
+            <div class="brainrot-progress" style="width:\${progressWidth}%"></div>
+        \`;
+        
+        list.appendChild(card);
+    });
+    
+    container.innerHTML = '';
+    container.appendChild(list);
+}
+
+function fetchBrainrots() {
+    fetch('/api/brainrots')
+        .then(r => r.json())
+        .then(data => renderBrainrots(data))
+        .catch(e => console.error('Fetch error:', e));
+}
+
+// Update timers every second
+setInterval(() => {
+    document.querySelectorAll('.brainrot-card').forEach(card => {
+        const expiresAt = parseInt(card.dataset.expiresAt);
+        if (!expiresAt) return;
+        
+        const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+        const timerEl = card.querySelector('.brainrot-timer');
+        const progressEl = card.querySelector('.brainrot-progress');
+        
+        if (timerEl) {
+            timerEl.textContent = remaining + 's';
+            timerEl.className = 'brainrot-timer ' + (remaining < 10 ? 'timer-expiring' : remaining < 20 ? 'timer-medium' : 'timer-fresh');
+        }
+        
+        if (progressEl) {
+            progressEl.style.width = ((remaining / 30) * 100) + '%';
+        }
+        
+        if (remaining <= 0) {
+            card.style.opacity = '0';
+            setTimeout(() => card.remove(), 300);
+        }
+    });
+}, 1000);
+
+// Fetch brainrots every second
+fetchBrainrots();
+setInterval(fetchBrainrots, 1000);
+</script>
+</body>
+</html>`;
     
     res.send(html);
 });
 
 app.listen(PORT, () => {
     console.log('===============================================');
-    console.log('JobID Scanner v3.5 - 7/8 ONLY + excludeFullGames');
+    console.log('🦖 Godzilla Notifier Backend v4.0');
     console.log('===============================================');
     console.log('Port: ' + PORT);
     console.log('Players: ' + MIN_PLAYERS + '-' + MAX_PLAYERS);
+    console.log('Brainrot TTL: ' + (BRAINROT_TTL / 1000) + 's');
     console.log('Pages scan: ' + MAX_PAGES);
-    console.log('Proxies: ' + PROXIES.length);
     console.log('===============================================');
     
     scanLoop();
