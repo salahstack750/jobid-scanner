@@ -24,6 +24,7 @@ const MAX_PAGES = 30;
 const JOBID_LOCK_TTL = 90 * 1000;
 const BOT_HISTORY_TTL = 6 * 60 * 60 * 1000;
 const BRAINROT_TTL = 30 * 1000;
+const MIN_BRAINROT_VALUE = 1000000;  // ✅ 1M minimum (modifiable)
 const MAX_LOGS = 200;
 
 // ✅ Liste de proxies (cascade fallback)
@@ -173,6 +174,7 @@ app.get('/', (req, res) => {
             maxPages: MAX_PAGES,
             excludeFullGames: true,
             brainrotTTL: BRAINROT_TTL / 1000 + 's',
+            minBrainrotValue: (MIN_BRAINROT_VALUE / 1000000) + 'M',
             uniqueJobIDs: true
         },
         endpoints: ['/health', '/jobs', '/report-data', '/log', '/stats', '/bots', '/dashboard', '/api/brainrots']
@@ -293,10 +295,13 @@ app.post('/report-data', (req, res) => {
     reports.set(botName + ':' + jobId, report);
     
     // ✅ MODIFIÉ: Ajoute TOUS les brainrots du tableau + players
+    // ✅ FILTRE: Ne garde que les brainrots >= MIN_BRAINROT_VALUE
     if (Array.isArray(brainrots) && brainrots.length > 0) {
         const now = Date.now();
+        
         for (const item of brainrots) {
-            if (item.numeric >= 0 && item.name) {
+            // ✅ Filtre par valeur minimale
+            if (item.numeric >= MIN_BRAINROT_VALUE && item.name) {
                 recentBrainrots.unshift({
                     botName: botName,
                     jobId: jobId,
@@ -312,7 +317,8 @@ app.post('/report-data', (req, res) => {
             }
         }
         
-        if (recentBrainrots.length > 100) recentBrainrots.length = 100;
+        // Limite à 500 brainrots max (que des gros maintenant)
+        if (recentBrainrots.length > 500) recentBrainrots.length = 500;
     }
     
     res.json({ success: true });
@@ -990,6 +996,7 @@ app.listen(PORT, () => {
     console.log('Port: ' + PORT);
     console.log('Players: ' + MIN_PLAYERS + '-' + MAX_PLAYERS);
     console.log('Brainrot TTL: ' + (BRAINROT_TTL / 1000) + 's');
+    console.log('Min value: ' + (MIN_BRAINROT_VALUE / 1000000) + 'M');
     console.log('Pages scan: ' + MAX_PAGES);
     console.log('JobID unique: OUI');
     console.log('===============================================');
