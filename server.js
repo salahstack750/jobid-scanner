@@ -272,6 +272,7 @@ app.post('/report-data', (req, res) => {
     const brainrots = body.brainrots;
     const source = body.source;
     const players = body.players;
+    const duel = body.duel;  // ✅ NOUVEAU: true/false pour duel activé
     
     if (!botName || !jobId) {
         return res.status(400).json({ error: 'Missing botName or jobId' });
@@ -289,6 +290,7 @@ app.post('/report-data', (req, res) => {
         brainrots: brainrots,
         source: source,
         players: players,
+        duel: duel,  // ✅ NOUVEAU
         timestamp: Date.now()
     };
     
@@ -311,6 +313,7 @@ app.post('/report-data', (req, res) => {
                     mutation: item.mutation || null,
                     source: item.source || 'unknown',
                     players: players || 0,
+                    duel: duel || false,  // ✅ NOUVEAU
                     receivedAt: now,
                     expiresAt: now + BRAINROT_TTL
                 });
@@ -416,7 +419,7 @@ app.get('/pool', (req, res) => {
     });
 });
 
-// ✅ MODIFIÉ: API brainrots avec players
+// ✅ MODIFIÉ: API brainrots avec players + duel
 app.get('/api/brainrots', (req, res) => {
     const now = Date.now();
     const active = [];
@@ -432,6 +435,7 @@ app.get('/api/brainrots', (req, res) => {
                 mutation: b.mutation,
                 source: b.source || 'unknown',
                 players: b.players || 0,
+                duel: b.duel || false,  // ✅ NOUVEAU
                 remainingSeconds: Math.ceil((b.expiresAt - now) / 1000)
             });
         }
@@ -661,6 +665,15 @@ body{
 @keyframes top-glow{
     0%,100%{box-shadow:0 0 10px rgba(255,215,0,0.5);}
     50%{box-shadow:0 0 20px rgba(255,215,0,1),0 0 30px rgba(255,215,0,0.8);}
+}
+.badge.duel{
+    background:#ff4444;
+    color:#ffffff;
+    animation:duel-pulse 2s ease-in-out infinite;
+}
+@keyframes duel-pulse{
+    0%,100%{box-shadow:0 0 10px rgba(255,68,68,0.5);}
+    50%{box-shadow:0 0 20px rgba(255,68,68,1),0 0 30px rgba(255,68,68,0.8);}
 }
 .top-brainrot{
     border-color:#ffd700 !important;
@@ -917,11 +930,15 @@ function renderBrainrots(brainrots) {
         // ✅ Badge TOP pour le meilleur
         const topBadge = index === 0 ? '<span class="badge top">🏆 TOP</span>' : '';
         
+        // ✅ Badge DUEL si activé
+        const duelBadge = b.duel ? '<span class="badge duel">⚔️ DUEL</span>' : '';
+        
         card.innerHTML = \`
             <div class="brainrot-header">
                 <div class="brainrot-left">
                     <div class="brainrot-badges">
                         \${topBadge}
+                        \${duelBadge}
                         <span class="badge source">\${sourceTag}</span>
                         <span class="badge players">👥 \${playersText}</span>
                     </div>
