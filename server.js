@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════
 // 🦖 GODZILLA NOTIFIER - Railway Backend
-// Modified by SALAH ⚡ | v4.0 - Dashboard Ultra Simple + 30s TTL
+// Modified by SALAH ⚡ | v5.0 FINAL - JobID unique + Players count
 // ═══════════════════════════════════════════════════════════════
 
 const express = require('express');
@@ -23,7 +23,7 @@ const SCAN_INTERVAL = 15000;
 const MAX_PAGES = 30;
 const JOBID_LOCK_TTL = 90 * 1000;
 const BOT_HISTORY_TTL = 6 * 60 * 60 * 1000;
-const BRAINROT_TTL = 30 * 1000;  // ✅ MODIFIÉ: 30 secondes au lieu de 60
+const BRAINROT_TTL = 30 * 1000;
 const MAX_LOGS = 200;
 
 // ✅ Liste de proxies (cascade fallback)
@@ -167,12 +167,13 @@ async function scanLoop() {
 app.get('/', (req, res) => {
     res.json({
         name: 'Godzilla Notifier Backend',
-        version: '4.0',
+        version: '5.0 FINAL',
         config: {
             players: MIN_PLAYERS + '-' + MAX_PLAYERS,
             maxPages: MAX_PAGES,
             excludeFullGames: true,
-            brainrotTTL: BRAINROT_TTL / 1000 + 's'
+            brainrotTTL: BRAINROT_TTL / 1000 + 's',
+            uniqueJobIDs: true
         },
         endpoints: ['/health', '/jobs', '/report-data', '/log', '/stats', '/bots', '/dashboard', '/api/brainrots']
     });
@@ -189,6 +190,7 @@ app.get('/health', (req, res) => {
     });
 });
 
+// ✅ MODIFIÉ: RETIRE LE JOBID DU POOL APRÈS DISTRIBUTION
 app.get('/jobs', (req, res) => {
     if (!checkAuth(req, res)) return;
     
@@ -234,6 +236,14 @@ app.get('/jobs', (req, res) => {
     
     const selected = candidates[Math.floor(Math.random() * candidates.length)];
     
+    // ✅ NOUVEAU: RETIRER LE JOBID DU POOL (plus jamais redistribué)
+    const poolArray = pools[poolKey];
+    const poolIndex = poolArray.findIndex(s => s.jobId === selected.jobId);
+    if (poolIndex !== -1) {
+        poolArray.splice(poolIndex, 1);
+        console.log('[JOBS] JobID retiré du pool. Reste:', poolArray.length);
+    }
+    
     jobLocks.set(selected.jobId, {
         botName: username,
         expiresAt: now + JOBID_LOCK_TTL
@@ -246,6 +256,7 @@ app.get('/jobs', (req, res) => {
     res.send(selected.jobId);
 });
 
+// ✅ MODIFIÉ: Stocke le nombre de joueurs
 app.post('/report-data', (req, res) => {
     if (!checkAuth(req, res)) return;
     
@@ -256,40 +267,55 @@ app.post('/report-data', (req, res) => {
     const money = body.money;
     const numeric = body.numeric || 0;
     const mutation = body.mutation;
+    const brainrots = body.brainrots;
+    const source = body.source;
     const players = body.players;
-    const brainrots = body.brainrots || [];
     
-    if (!botName) return res.status(400).json({ error: 'botName required' });
+    if (!botName || !jobId) {
+        return res.status(400).json({ error: 'Missing botName or jobId' });
+    }
     
     stats.reportsReceived++;
     
-    reports.set(botName, {
+    const report = {
         botName: botName,
         jobId: jobId,
-        lastBrainrot: { name: name, money: money, numeric: numeric, mutation: mutation },
-        players: players,
+        name: name,
+        money: money,
+        numeric: numeric,
+        mutation: mutation,
         brainrots: brainrots,
-        receivedAt: Date.now()
-    });
+        source: source,
+        players: players,
+        timestamp: Date.now()
+    };
     
-    // ✅ Ajoute les brainrots à la liste (seuil à 0 pour tout capturer en test)
-    if (numeric >= 0 && name) {
+    reports.set(botName + ':' + jobId, report);
+    
+    // ✅ MODIFIÉ: Ajoute TOUS les brainrots du tableau + players
+    if (Array.isArray(brainrots) && brainrots.length > 0) {
         const now = Date.now();
-        recentBrainrots.unshift({
-            botName: botName,
-            jobId: jobId,
-            name: name,
-            money: money,
-            numeric: numeric,
-            mutation: mutation,
-            receivedAt: now,
-            expiresAt: now + BRAINROT_TTL
-        });
+        for (const item of brainrots) {
+            if (item.numeric >= 0 && item.name) {
+                recentBrainrots.unshift({
+                    botName: botName,
+                    jobId: jobId,
+                    name: item.name,
+                    money: item.money,
+                    numeric: item.numeric,
+                    mutation: item.mutation || null,
+                    source: item.source || 'unknown',
+                    players: players || 0,
+                    receivedAt: now,
+                    expiresAt: now + BRAINROT_TTL
+                });
+            }
+        }
         
         if (recentBrainrots.length > 100) recentBrainrots.length = 100;
     }
     
-    res.json({ ok: true });
+    res.json({ success: true });
 });
 
 app.post('/log', (req, res) => {
@@ -298,77 +324,93 @@ app.post('/log', (req, res) => {
     const body = req.body || {};
     const botName = body.botName || 'unknown';
     const message = body.message || '';
-    const level = body.level || 'INFO';
     
-    if (!message) return res.status(400).json({ error: 'message required' });
+    if (!message) {
+        return res.status(400).json({ error: 'Missing message' });
+    }
     
     stats.logsReceived++;
     
     liveLogs.unshift({
         botName: botName,
         message: message,
-        level: level,
         timestamp: Date.now()
     });
     
     if (liveLogs.length > MAX_LOGS) liveLogs.length = MAX_LOGS;
     
-    res.json({ ok: true });
-});
-
-app.post('/report-failed', (req, res) => {
-    if (!checkAuth(req, res)) return;
-    const body = req.body || {};
-    if (body.jobId) jobLocks.delete(body.jobId);
-    res.json({ ok: true });
+    res.json({ success: true });
 });
 
 app.get('/stats', (req, res) => {
+    const uptime = Math.floor((Date.now() - stats.startedAt) / 1000);
+    
     res.json({
+        uptime: uptime,
         totalScans: stats.totalScans,
         jobsServed: stats.jobsServed,
         reportsReceived: stats.reportsReceived,
         logsReceived: stats.logsReceived,
-        uptime: Math.floor((Date.now() - stats.startedAt) / 1000),
+        activeBots: botHistory.size,
+        activeJobs: jobLocks.size,
+        recentBrainrots: recentBrainrots.length,
         pools: {
             rebirth0: pools.rebirth0.length,
             rebirth1plus: pools.rebirth1plus.length
-        },
-        bots: botHistory.size,
-        reports: reports.size
+        }
     });
 });
 
 app.get('/bots', (req, res) => {
+    const bots = [];
     const now = Date.now();
-    const list = [];
     
-    for (const [botName, data] of botHistory.entries()) {
-        const report = reports.get(botName);
-        const sinceLastJob = (now - data.lastSeen) / 1000;
-        
-        list.push({
-            botName: botName,
+    for (const [name, data] of botHistory.entries()) {
+        const secondsSinceLastSeen = Math.floor((now - data.lastSeen) / 1000);
+        bots.push({
+            name: name,
+            firstSeen: new Date(data.firstSeen).toISOString(),
+            lastSeen: new Date(data.lastSeen).toISOString(),
+            secondsSinceLastSeen: secondsSinceLastSeen,
             jobsReceived: data.jobsReceived,
             currentJobId: data.currentJobId,
-            lastSeenSeconds: Math.floor(sinceLastJob),
-            isActive: sinceLastJob < 30,
-            isDead: sinceLastJob > 300,
-            lastBrainrot: report ? report.lastBrainrot : null,
-            players: report ? report.players : null
+            visitedJobsCount: data.visitedJobs.size
         });
     }
     
-    list.sort((a, b) => b.jobsReceived - a.jobsReceived);
-    res.json(list);
+    bots.sort((a, b) => a.secondsSinceLastSeen - b.secondsSinceLastSeen);
+    
+    res.json(bots);
 });
 
 app.get('/pool', (req, res) => {
-    if (!checkAuth(req, res)) return;
-    res.json(pools);
+    const placeId = parseInt(req.query.placeId);
+    
+    let poolKey;
+    if (placeId === POOL_CONFIG.rebirth0.placeId) poolKey = 'rebirth0';
+    else if (placeId === POOL_CONFIG.rebirth1plus.placeId) poolKey = 'rebirth1plus';
+    else {
+        return res.json({
+            rebirth0: {
+                placeId: POOL_CONFIG.rebirth0.placeId,
+                count: pools.rebirth0.length
+            },
+            rebirth1plus: {
+                placeId: POOL_CONFIG.rebirth1plus.placeId,
+                count: pools.rebirth1plus.length
+            }
+        });
+    }
+    
+    const pool = pools[poolKey] || [];
+    res.json({
+        placeId: POOL_CONFIG[poolKey].placeId,
+        count: pool.length,
+        servers: pool
+    });
 });
 
-// ✅ NOUVEAU: API brainrots uniquement
+// ✅ MODIFIÉ: API brainrots avec players
 app.get('/api/brainrots', (req, res) => {
     const now = Date.now();
     const active = [];
@@ -382,6 +424,8 @@ app.get('/api/brainrots', (req, res) => {
                 money: b.money,
                 numeric: b.numeric,
                 mutation: b.mutation,
+                source: b.source || 'unknown',
+                players: b.players || 0,
                 remainingSeconds: Math.ceil((b.expiresAt - now) / 1000)
             });
         }
@@ -390,12 +434,8 @@ app.get('/api/brainrots', (req, res) => {
     res.json(active);
 });
 
-// ═══════════════════════════════════════════════════════════════
-// 🦖 DASHBOARD ULTRA SIMPLE - BRAINROTS UNIQUEMENT
-// ═══════════════════════════════════════════════════════════════
+// ✅ DASHBOARD ULTRA PREMIUM AVEC PLAYERS
 app.get('/dashboard', (req, res) => {
-    res.setHeader('Content-Type', 'text/html');
-    
     const html = `<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -405,133 +445,390 @@ app.get('/dashboard', (req, res) => {
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
 body{
-    font-family:'Courier New',monospace;
-    background:#0a0a0a;
+    font-family:'SF Mono','Monaco','Inconsolata','Courier New',monospace;
+    background:#000000;
     color:#00ff00;
     min-height:100vh;
     padding:20px;
+    overflow-x:hidden;
+}
+.bg-grid{
+    position:fixed;
+    top:0;
+    left:0;
+    width:100%;
+    height:100%;
+    background-image:
+        linear-gradient(rgba(0,255,0,0.03) 1px,transparent 1px),
+        linear-gradient(90deg,rgba(0,255,0,0.03) 1px,transparent 1px);
+    background-size:50px 50px;
+    z-index:-1;
+    animation:grid-move 20s linear infinite;
+}
+@keyframes grid-move{
+    0%{background-position:0 0;}
+    100%{background-position:50px 50px;}
 }
 .container{
-    max-width:900px;
+    max-width:1200px;
     margin:0 auto;
+    position:relative;
+    z-index:1;
 }
 .header{
     text-align:center;
-    margin-bottom:30px;
-    padding:20px;
-    border:2px solid #00ff00;
-    background:rgba(0,255,0,0.05);
+    margin-bottom:40px;
+    padding:30px;
+    background:#000000;
+    border:3px solid #00ff00;
+    position:relative;
+    overflow:hidden;
+}
+.header::before{
+    content:'';
+    position:absolute;
+    top:-50%;
+    left:-50%;
+    width:200%;
+    height:200%;
+    background:repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,255,0,0.03) 2px,
+        rgba(0,255,0,0.03) 4px
+    );
+    animation:scan 8s linear infinite;
+}
+@keyframes scan{
+    0%{transform:translateY(0);}
+    100%{transform:translateY(50px);}
+}
+.header-content{
+    position:relative;
+    z-index:1;
 }
 .header h1{
-    font-size:32px;
+    font-size:48px;
     color:#00ff00;
-    text-shadow:0 0 10px #00ff00;
-    margin-bottom:5px;
+    text-shadow:
+        0 0 10px #00ff00,
+        0 0 20px #00ff00,
+        0 0 30px #00ff00,
+        0 0 40px #00ff00;
+    margin-bottom:10px;
+    letter-spacing:8px;
+    font-weight:900;
+    animation:glow-pulse 2s ease-in-out infinite;
+}
+@keyframes glow-pulse{
+    0%,100%{text-shadow:0 0 10px #00ff00,0 0 20px #00ff00,0 0 30px #00ff00;}
+    50%{text-shadow:0 0 20px #00ff00,0 0 30px #00ff00,0 0 40px #00ff00,0 0 50px #00ff00;}
 }
 .header .subtitle{
-    font-size:12px;
-    color:#00aa00;
+    font-size:14px;
+    color:#00ff00;
     opacity:0.8;
+    text-transform:uppercase;
+    letter-spacing:4px;
+    font-weight:600;
+}
+.stats-bar{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    gap:15px;
+    margin-bottom:30px;
+}
+.stat-box{
+    background:#000000;
+    border:2px solid #00ff00;
+    padding:15px;
+    text-align:center;
+    position:relative;
+    overflow:hidden;
+}
+.stat-box::before{
+    content:'';
+    position:absolute;
+    top:0;
+    left:-100%;
+    width:100%;
+    height:100%;
+    background:linear-gradient(90deg,transparent,rgba(0,255,0,0.2),transparent);
+    animation:stat-shine 3s infinite;
+}
+@keyframes stat-shine{
+    0%{left:-100%;}
+    100%{left:100%;}
+}
+.stat-label{
+    font-size:10px;
+    opacity:0.7;
+    margin-bottom:5px;
+    letter-spacing:2px;
+}
+.stat-value{
+    font-size:24px;
+    font-weight:900;
+    color:#00ff00;
+    text-shadow:0 0 10px #00ff00;
 }
 .empty{
     text-align:center;
-    padding:60px 20px;
-    color:#006600;
-    font-size:16px;
-    border:1px dashed #006600;
-    background:rgba(0,255,0,0.02);
+    padding:100px 20px;
+    color:#00ff00;
+    font-size:20px;
+    border:3px dashed #00ff00;
+    background:#000000;
+    opacity:0.3;
+    text-transform:uppercase;
+    letter-spacing:3px;
 }
 .brainrot-list{
-    display:flex;
-    flex-direction:column;
-    gap:12px;
+    display:grid;
+    gap:20px;
 }
 .brainrot-card{
-    background:rgba(0,255,0,0.05);
-    border:1px solid #00ff00;
-    border-radius:8px;
-    padding:16px;
+    background:#000000;
+    border:3px solid #00ff00;
+    padding:25px;
     position:relative;
     overflow:hidden;
-    transition:all 0.3s ease;
+    transition:all 0.3s cubic-bezier(0.4,0,0.2,1);
+    box-shadow:0 0 20px rgba(0,255,0,0.3);
+}
+.brainrot-card::before{
+    content:'';
+    position:absolute;
+    top:0;
+    left:0;
+    width:6px;
+    height:100%;
+    background:#00ff00;
+    box-shadow:0 0 10px #00ff00;
+}
+.top-brainrot::before{
+    background:#ffd700 !important;
+    box-shadow:0 0 15px #ffd700 !important;
 }
 .brainrot-card:hover{
-    background:rgba(0,255,0,0.1);
-    box-shadow:0 0 20px rgba(0,255,0,0.3);
+    transform:translateX(5px);
+    box-shadow:0 0 40px rgba(0,255,0,0.6);
+    border-color:#00ff00;
 }
 .brainrot-header{
     display:flex;
     justify-content:space-between;
-    align-items:center;
-    margin-bottom:10px;
+    align-items:flex-start;
+    margin-bottom:20px;
+}
+.brainrot-left{
+    flex:1;
+}
+.brainrot-badges{
+    display:flex;
+    gap:8px;
+    margin-bottom:12px;
+    flex-wrap:wrap;
+}
+.badge{
+    display:inline-block;
+    padding:6px 12px;
+    background:#00ff00;
+    color:#000000;
+    font-size:11px;
+    font-weight:900;
+    letter-spacing:1.5px;
+    box-shadow:0 0 10px rgba(0,255,0,0.5);
+}
+.badge.source{
+    background:#00ff00;
+}
+.badge.players{
+    background:#00ff00;
+}
+.badge.top{
+    background:#ffd700;
+    color:#000000;
+    animation:top-glow 1.5s ease-in-out infinite;
+}
+@keyframes top-glow{
+    0%,100%{box-shadow:0 0 10px rgba(255,215,0,0.5);}
+    50%{box-shadow:0 0 20px rgba(255,215,0,1),0 0 30px rgba(255,215,0,0.8);}
+}
+.top-brainrot{
+    border-color:#ffd700 !important;
+    box-shadow:0 0 30px rgba(255,215,0,0.5) !important;
+}
+.top-brainrot:hover{
+    box-shadow:0 0 50px rgba(255,215,0,0.8) !important;
 }
 .brainrot-name{
-    font-size:18px;
-    font-weight:bold;
-    color:#00ff00;
+    font-size:26px;
+    font-weight:900;
+    color:#ffffff;
+    text-shadow:0 0 15px #00ff00;
+    margin-bottom:8px;
+    line-height:1.2;
 }
 .brainrot-value{
-    font-size:20px;
-    font-weight:bold;
+    font-size:42px;
+    font-weight:900;
     color:#00ff00;
-    text-shadow:0 0 5px #00ff00;
+    text-shadow:
+        0 0 10px #00ff00,
+        0 0 20px #00ff00,
+        0 0 30px #00ff00;
+    letter-spacing:3px;
 }
 .brainrot-meta{
     display:flex;
     gap:20px;
     font-size:13px;
-    color:#00aa00;
+    color:#00ff00;
+    opacity:0.8;
+    margin-bottom:15px;
+    flex-wrap:wrap;
 }
 .brainrot-meta span{
     display:flex;
     align-items:center;
-    gap:5px;
+    gap:6px;
+}
+.brainrot-footer{
+    display:flex;
+    gap:12px;
+    align-items:center;
+}
+.btn-join{
+    background:#00ff00;
+    color:#000000;
+    border:none;
+    padding:12px 30px;
+    font-size:16px;
+    font-weight:900;
+    cursor:pointer;
+    transition:all 0.2s;
+    letter-spacing:2px;
+    font-family:inherit;
+    box-shadow:0 0 15px rgba(0,255,0,0.5);
+    position:relative;
+    overflow:hidden;
+}
+.btn-join::before{
+    content:'';
+    position:absolute;
+    top:50%;
+    left:50%;
+    width:0;
+    height:0;
+    background:rgba(255,255,255,0.3);
+    border-radius:50%;
+    transform:translate(-50%,-50%);
+    transition:width 0.6s,height 0.6s;
+}
+.btn-join:hover::before{
+    width:300px;
+    height:300px;
+}
+.btn-join:hover{
+    transform:scale(1.05);
+    box-shadow:0 0 30px rgba(0,255,0,0.8);
+}
+.btn-join:active{
+    transform:scale(0.95);
 }
 .brainrot-timer{
-    position:absolute;
-    top:8px;
-    right:8px;
-    background:rgba(0,0,0,0.6);
-    padding:4px 10px;
-    border-radius:12px;
-    font-size:14px;
-    font-weight:bold;
+    background:#000000;
+    border:2px solid #00ff00;
+    padding:8px 16px;
+    font-size:18px;
+    font-weight:900;
+    min-width:70px;
+    text-align:center;
+    box-shadow:0 0 10px rgba(0,255,0,0.3);
 }
 .timer-fresh{color:#00ff00;}
 .timer-medium{color:#ffaa00;}
-.timer-expiring{color:#ff5555;animation:pulse 0.5s infinite;}
-@keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.5;}}
+.timer-expiring{
+    color:#ff5555;
+    animation:timer-pulse 0.5s infinite;
+}
+@keyframes timer-pulse{
+    0%,100%{opacity:1;transform:scale(1);}
+    50%{opacity:0.5;transform:scale(1.1);}
+}
 .brainrot-progress{
     position:absolute;
     bottom:0;
     left:0;
-    height:3px;
-    background:linear-gradient(90deg,#00ff00,#ffaa00,#ff5555);
+    height:5px;
+    background:#00ff00;
     transition:width 1s linear;
+    box-shadow:0 0 15px #00ff00;
 }
 .footer{
     text-align:center;
-    margin-top:30px;
-    padding:15px;
-    color:#006600;
-    font-size:11px;
-    border-top:1px solid #006600;
+    margin-top:50px;
+    padding:25px;
+    color:#00ff00;
+    font-size:12px;
+    opacity:0.4;
+    border-top:2px solid #00ff00;
+    text-transform:uppercase;
+    letter-spacing:3px;
+}
+.copied-toast{
+    position:fixed;
+    top:30px;
+    right:30px;
+    background:#00ff00;
+    color:#000000;
+    padding:20px 30px;
+    font-weight:900;
+    font-size:16px;
+    box-shadow:0 0 40px rgba(0,255,0,1);
+    z-index:9999;
+    animation:toast-in 0.3s ease;
+    border:3px solid #000000;
+}
+@keyframes toast-in{
+    from{transform:translateX(500px);opacity:0;}
+    to{transform:translateX(0);opacity:1;}
 }
 </style>
 </head>
 <body>
+<div class="bg-grid"></div>
 <div class="container">
     <div class="header">
-        <h1>🦖 GODZILLA NOTIFIER</h1>
-        <div class="subtitle">BRAINROTS LIVE - TTL 30 SECONDES</div>
+        <div class="header-content">
+            <h1>🦖 GODZILLA NOTIFIER</h1>
+            <div class="subtitle">BRAINROTS LIVE — TTL 30 SECONDES</div>
+        </div>
+    </div>
+    
+    <div class="stats-bar" id="stats-bar" style="display:none;">
+        <div class="stat-box">
+            <div class="stat-label">TOTAL BRAINROTS</div>
+            <div class="stat-value" id="stat-total">0</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">ACTIFS (< 15S)</div>
+            <div class="stat-value" id="stat-active">0</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">EXPIRANT (< 10S)</div>
+            <div class="stat-value" id="stat-expiring">0</div>
+        </div>
     </div>
     
     <div id="brainrots-container">
-        <div class="empty">En attente de brainrots...</div>
+        <div class="empty">EN ATTENTE DE BRAINROTS...</div>
     </div>
     
     <div class="footer">
-        Dev by SALAH ⚡ | Auto-refresh: 1s | Scan expire: 30s
+        Dev by SALAH ⚡ | Auto-refresh: 1s | JobID unique par bot
     </div>
 </div>
 
@@ -540,18 +837,60 @@ function formatMoney(money) {
     return money || '$0';
 }
 
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => {
+        showToast('✅ JOBID COPIÉ !');
+    }).catch(() => {
+        showToast('❌ ERREUR COPIE');
+    });
+}
+
+function showToast(message) {
+    const existing = document.querySelector('.copied-toast');
+    if (existing) existing.remove();
+    
+    const toast = document.createElement('div');
+    toast.className = 'copied-toast';
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2500);
+}
+
+function updateStats(brainrots) {
+    if (!brainrots || brainrots.length === 0) {
+        document.getElementById('stats-bar').style.display = 'none';
+        return;
+    }
+    
+    document.getElementById('stats-bar').style.display = 'grid';
+    
+    const total = brainrots.length;
+    const active = brainrots.filter(b => b.remainingSeconds >= 15).length;
+    const expiring = brainrots.filter(b => b.remainingSeconds < 10).length;
+    
+    document.getElementById('stat-total').textContent = total;
+    document.getElementById('stat-active').textContent = active;
+    document.getElementById('stat-expiring').textContent = expiring;
+}
+
 function renderBrainrots(brainrots) {
     const container = document.getElementById('brainrots-container');
     
     if (!brainrots || brainrots.length === 0) {
-        container.innerHTML = '<div class="empty">En attente de brainrots...</div>';
+        container.innerHTML = '<div class="empty">EN ATTENTE DE BRAINROTS...</div>';
+        updateStats(null);
         return;
     }
+    
+    updateStats(brainrots);
+    
+    // ✅ TRI PAR VALEUR DÉCROISSANTE (du plus gros au plus petit)
+    const sortedBrainrots = brainrots.sort((a, b) => b.numeric - a.numeric);
     
     const list = document.createElement('div');
     list.className = 'brainrot-list';
     
-    brainrots.forEach(b => {
+    sortedBrainrots.forEach((b, index) => {
         const remaining = b.remainingSeconds || 0;
         const timerClass = remaining < 10 ? 'timer-expiring' : remaining < 20 ? 'timer-medium' : 'timer-fresh';
         const progressWidth = (remaining / 30) * 100;
@@ -560,17 +899,37 @@ function renderBrainrots(brainrots) {
         card.className = 'brainrot-card';
         card.dataset.expiresAt = Date.now() + (remaining * 1000);
         
-        const mutationTag = b.mutation && b.mutation !== 'None' ? '[' + b.mutation + ']' : '';
+        // ✅ Ajouter classe spéciale pour le TOP 1
+        if (index === 0) {
+            card.classList.add('top-brainrot');
+        }
+        
+        const mutationTag = b.mutation && b.mutation !== 'None' ? '[' + b.mutation + '] ' : '';
+        const sourceTag = (b.source === 'carpet' ? 'CARPET' : b.source === 'plot' ? 'PLOT' : 'UNKNOWN').toUpperCase();
+        const playersText = (b.players || 0) + '/8';
+        
+        // ✅ Badge TOP pour le meilleur
+        const topBadge = index === 0 ? '<span class="badge top">🏆 TOP</span>' : '';
         
         card.innerHTML = \`
-            <div class="brainrot-timer \${timerClass}">\${remaining}s</div>
             <div class="brainrot-header">
-                <div class="brainrot-name">\${mutationTag} \${b.name}</div>
+                <div class="brainrot-left">
+                    <div class="brainrot-badges">
+                        \${topBadge}
+                        <span class="badge source">\${sourceTag}</span>
+                        <span class="badge players">👥 \${playersText}</span>
+                    </div>
+                    <div class="brainrot-name">\${mutationTag}\${b.name}</div>
+                </div>
                 <div class="brainrot-value">\${formatMoney(b.money)}</div>
             </div>
             <div class="brainrot-meta">
                 <span>🤖 \${b.botName}</span>
-                <span>🎮 JobID: \${b.jobId.substring(0, 12)}...</span>
+                <span>🎮 \${b.jobId.substring(0, 16)}...</span>
+            </div>
+            <div class="brainrot-footer">
+                <button class="btn-join" onclick="copyToClipboard('\${b.jobId}')">JOIN</button>
+                <div class="brainrot-timer \${timerClass}">\${remaining}s</div>
             </div>
             <div class="brainrot-progress" style="width:\${progressWidth}%"></div>
         \`;
@@ -589,7 +948,6 @@ function fetchBrainrots() {
         .catch(e => console.error('Fetch error:', e));
 }
 
-// Update timers every second
 setInterval(() => {
     document.querySelectorAll('.brainrot-card').forEach(card => {
         const expiresAt = parseInt(card.dataset.expiresAt);
@@ -610,12 +968,12 @@ setInterval(() => {
         
         if (remaining <= 0) {
             card.style.opacity = '0';
+            card.style.transform = 'translateX(-20px)';
             setTimeout(() => card.remove(), 300);
         }
     });
 }, 1000);
 
-// Fetch brainrots every second
 fetchBrainrots();
 setInterval(fetchBrainrots, 1000);
 </script>
@@ -627,12 +985,13 @@ setInterval(fetchBrainrots, 1000);
 
 app.listen(PORT, () => {
     console.log('===============================================');
-    console.log('🦖 Godzilla Notifier Backend v4.0');
+    console.log('🦖 Godzilla Notifier Backend v5.0 FINAL');
     console.log('===============================================');
     console.log('Port: ' + PORT);
     console.log('Players: ' + MIN_PLAYERS + '-' + MAX_PLAYERS);
     console.log('Brainrot TTL: ' + (BRAINROT_TTL / 1000) + 's');
     console.log('Pages scan: ' + MAX_PAGES);
+    console.log('JobID unique: OUI');
     console.log('===============================================');
     
     scanLoop();
