@@ -272,7 +272,6 @@ app.post('/report-data', (req, res) => {
     const brainrots = body.brainrots;
     const source = body.source;
     const players = body.players;
-    const duel = body.duel;  // ✅ NOUVEAU: true/false pour duel activé
     
     if (!botName || !jobId) {
         return res.status(400).json({ error: 'Missing botName or jobId' });
@@ -290,7 +289,6 @@ app.post('/report-data', (req, res) => {
         brainrots: brainrots,
         source: source,
         players: players,
-        duel: duel,  // ✅ NOUVEAU
         timestamp: Date.now()
     };
     
@@ -298,30 +296,42 @@ app.post('/report-data', (req, res) => {
     
     // ✅ MODIFIÉ: Ajoute TOUS les brainrots du tableau + players
     // ✅ FILTRE: Ne garde que les brainrots >= MIN_BRAINROT_VALUE
+    // ✅ ANTI-DOUBLONS: Skip si même name + numeric + JobID existe déjà
     if (Array.isArray(brainrots) && brainrots.length > 0) {
         const now = Date.now();
         
         for (const item of brainrots) {
             // ✅ Filtre par valeur minimale
             if (item.numeric >= MIN_BRAINROT_VALUE && item.name) {
-                recentBrainrots.unshift({
-                    botName: botName,
-                    jobId: jobId,
-                    name: item.name,
-                    money: item.money,
-                    numeric: item.numeric,
-                    mutation: item.mutation || null,
-                    source: item.source || 'unknown',
-                    players: players || 0,
-                    duel: duel || false,  // ✅ NOUVEAU
-                    receivedAt: now,
-                    expiresAt: now + BRAINROT_TTL
-                });
+                
+                // ✅ ANTI-DOUBLONS: Vérifie si ce brainrot existe déjà (même serveur)
+                const isDuplicate = recentBrainrots.some(existing => 
+                    existing.name === item.name && 
+                    existing.numeric === item.numeric &&
+                    existing.jobId === jobId &&  // ✅ Même JobID = même serveur
+                    existing.expiresAt > now  // Encore actif
+                );
+                
+                // ✅ N'ajoute que si pas un doublon
+                if (!isDuplicate) {
+                    recentBrainrots.unshift({
+                        botName: botName,
+                        jobId: jobId,
+                        name: item.name,
+                        money: item.money,
+                        numeric: item.numeric,
+                        mutation: item.mutation || null,
+                        source: item.source || 'unknown',
+                        players: players || 0,
+                        receivedAt: now,
+                        expiresAt: now + BRAINROT_TTL
+                    });
+                }
             }
         }
         
-        // Limite à 500 brainrots max (que des gros maintenant)
-        if (recentBrainrots.length > 500) recentBrainrots.length = 500;
+        // ✅ PAS DE LIMITE MAX - INFINI
+        // (Suppression de la limite de 500)
     }
     
     res.json({ success: true });
@@ -419,7 +429,7 @@ app.get('/pool', (req, res) => {
     });
 });
 
-// ✅ MODIFIÉ: API brainrots avec players + duel
+// ✅ API brainrots avec players
 app.get('/api/brainrots', (req, res) => {
     const now = Date.now();
     const active = [];
@@ -435,7 +445,6 @@ app.get('/api/brainrots', (req, res) => {
                 mutation: b.mutation,
                 source: b.source || 'unknown',
                 players: b.players || 0,
-                duel: b.duel || false,  // ✅ NOUVEAU
                 remainingSeconds: Math.ceil((b.expiresAt - now) / 1000)
             });
         }
@@ -666,15 +675,6 @@ body{
     0%,100%{box-shadow:0 0 10px rgba(255,215,0,0.5);}
     50%{box-shadow:0 0 20px rgba(255,215,0,1),0 0 30px rgba(255,215,0,0.8);}
 }
-.badge.duel{
-    background:#ff4444;
-    color:#ffffff;
-    animation:duel-pulse 2s ease-in-out infinite;
-}
-@keyframes duel-pulse{
-    0%,100%{box-shadow:0 0 10px rgba(255,68,68,0.5);}
-    50%{box-shadow:0 0 20px rgba(255,68,68,1),0 0 30px rgba(255,68,68,0.8);}
-}
 .top-brainrot{
     border-color:#ffd700 !important;
     box-shadow:0 0 30px rgba(255,215,0,0.5) !important;
@@ -853,7 +853,40 @@ body{
 
 <script>
 function formatMoney(money) {
-    return money || '$0';
+    // Si money est déjà une string formatée, on la retourne
+    if (typeof money === 'string' && money.startsWith('$')) {
+        return money;
+    }
+    
+    // Sinon on formate à partir de numeric
+    return money || '$0/s';
+}
+
+function formatNumeric(num) {
+    if (!num || num === 0) return '$0/s';
+    
+    const absNum = Math.abs(num);
+    let formatted;
+    
+    if (absNum >= 1e12) {
+        // Trillions
+        formatted = '$' + (num / 1e12).toFixed(1) + 'T/s';
+    } else if (absNum >= 1e9) {
+        // Billions
+        formatted = '$' + (num / 1e9).toFixed(1) + 'B/s';
+    } else if (absNum >= 1e6) {
+        // Millions
+        formatted = '$' + (num / 1e6).toFixed(1) + 'M/s';
+    } else if (absNum >= 1e3) {
+        // Thousands
+        formatted = '$' + (num / 1e3).toFixed(1) + 'K/s';
+    } else {
+        // Less than 1000
+        formatted = '$' + num.toFixed(0) + '/s';
+    }
+    
+    // Supprimer les .0 inutiles
+    return formatted.replace('.0', '');
 }
 
 function copyToClipboard(text) {
@@ -930,21 +963,17 @@ function renderBrainrots(brainrots) {
         // ✅ Badge TOP pour le meilleur
         const topBadge = index === 0 ? '<span class="badge top">🏆 TOP</span>' : '';
         
-        // ✅ Badge DUEL si activé
-        const duelBadge = b.duel ? '<span class="badge duel">⚔️ DUEL</span>' : '';
-        
         card.innerHTML = \`
             <div class="brainrot-header">
                 <div class="brainrot-left">
                     <div class="brainrot-badges">
                         \${topBadge}
-                        \${duelBadge}
                         <span class="badge source">\${sourceTag}</span>
                         <span class="badge players">👥 \${playersText}</span>
                     </div>
                     <div class="brainrot-name">\${mutationTag}\${b.name}</div>
                 </div>
-                <div class="brainrot-value">\${formatMoney(b.money)}</div>
+                <div class="brainrot-value">\${formatNumeric(b.numeric)}</div>
             </div>
             <div class="brainrot-meta">
                 <span>🤖 \${b.botName}</span>
