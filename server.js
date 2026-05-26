@@ -1,7 +1,6 @@
-// ═══════════════════════════════════════════════════════════════
-// 🦖 GODZILLA NOTIFIER - Railway Backend
-// Modified by SALAH ⚡ | v5.0 FINAL - JobID unique + Players count
-// ═══════════════════════════════════════════════════════════════
+// Godzilla Notifier Backend - OPTI MAX v6.0
+// Vitesse maximale + Scoring FPS/Ping + Monitoring complet + Dashboard
+// Modified by SALAH
 
 const express = require('express');
 
@@ -16,27 +15,46 @@ const POOL_CONFIG = {
     rebirth1plus: { placeId: 109983668079237, label: 'Rebirth 1+' }
 };
 
-// ✅ CONFIG MODIFIEE
+// ============================================================
+// CONFIG OPTI MAX
+// ============================================================
+
+// VITESSE
 const MIN_PLAYERS = 5;
 const MAX_PLAYERS = 7;
-const SCAN_INTERVAL = 15000;
-const MAX_PAGES = 30;
-const JOBID_LOCK_TTL = 90 * 1000;
+const SCAN_INTERVAL = 8000;
+const MAX_PAGES = 50;
+const JOBID_LOCK_TTL = 30 * 1000;
 const BOT_HISTORY_TTL = 6 * 60 * 60 * 1000;
 const BRAINROT_TTL = 30 * 1000;
-const MIN_BRAINROT_VALUE = 1000000;  // ✅ 1M minimum (modifiable)
+const MIN_BRAINROT_VALUE = 1000000;
 const MAX_LOGS = 200;
 
-// ✅ Liste de proxies (cascade fallback)
+// SCORING (toggle pour activer/desactiver le filtrage)
+const FILTERING_ENABLED = true;
+const MIN_FPS = 35;
+const MAX_PING = 500;
+const TOP_DISTRIBUTION_RATIO = 0.7;
+
+// PROXIES
 const PROXIES = [
     'https://roblox-proxy.salahelarabi03.workers.dev',
     'https://games.roproxy.com',
     'https://games.roblox.com'
 ];
 
+// ============================================================
+// STATE
+// ============================================================
+
 const pools = {
     rebirth0: [],
     rebirth1plus: []
+};
+
+const poolQualityStats = {
+    rebirth0: { avgFps: 0, avgPing: 0, avgScore: 0, filtered: 0, total: 0 },
+    rebirth1plus: { avgFps: 0, avgPing: 0, avgScore: 0, filtered: 0, total: 0 }
 };
 
 const jobLocks = new Map();
@@ -48,10 +66,40 @@ const liveLogs = [];
 const stats = {
     totalScans: 0,
     jobsServed: 0,
+    jobsServedTopScore: 0,
+    jobsServedRandom: 0,
     reportsReceived: 0,
+    reportsWithBrainrots: 0,
     logsReceived: 0,
     startedAt: Date.now()
 };
+
+// ============================================================
+// SCORING FUNCTION
+// ============================================================
+
+function calculateServerScore(server) {
+    let score = 100;
+    
+    if (server.fps !== undefined && server.fps !== null) {
+        if (server.fps < 30) score -= 80;
+        else if (server.fps < 45) score -= 50;
+        else if (server.fps < 55) score -= 20;
+        else if (server.fps >= 58) score += 20;
+    }
+    
+    if (server.ping !== undefined && server.ping !== null) {
+        if (server.ping > 500) score -= 50;
+        else if (server.ping > 200) score -= 20;
+        else if (server.ping < 80) score += 10;
+    }
+    
+    if (server.players === 7) score += 15;
+    else if (server.players === 6) score += 5;
+    else if (server.players === 5) score -= 5;
+    
+    return score;
+}
 
 function checkAuth(req, res) {
     const key = req.query.key || req.headers['x-api-key'];
@@ -82,9 +130,9 @@ function cleanupExpired() {
 
 setInterval(cleanupExpired, 5000);
 
-// ═══════════════════════════════════════════════════════════════
-// ✅ FETCH SERVERS avec excludeFullGames + multi-proxy fallback
-// ═══════════════════════════════════════════════════════════════
+// ============================================================
+// FETCH SERVERS
+// ============================================================
 async function fetchServers(placeId, cursor) {
     const path = '/v1/games/' + placeId + '/servers/Public?limit=100&excludeFullGames=true' + (cursor ? '&cursor=' + cursor : '');
     
@@ -122,6 +170,11 @@ async function scanPool(poolKey) {
     
     const newPool = [];
     let cursor = '';
+    let totalScanned = 0;
+    let filteredOut = 0;
+    let sumFps = 0;
+    let sumPing = 0;
+    let sumScore = 0;
     
     for (let page = 0; page < MAX_PAGES; page++) {
         const data = await fetchServers(config.placeId, cursor);
@@ -129,11 +182,34 @@ async function scanPool(poolKey) {
         
         for (const server of data.data) {
             if (server.playing >= MIN_PLAYERS && server.playing <= MAX_PLAYERS) {
-                newPool.push({
+                totalScanned++;
+                
+                if (FILTERING_ENABLED) {
+                    if (server.fps !== undefined && server.fps < MIN_FPS) {
+                        filteredOut++;
+                        continue;
+                    }
+                    if (server.ping !== undefined && server.ping > MAX_PING) {
+                        filteredOut++;
+                        continue;
+                    }
+                }
+                
+                const serverData = {
                     jobId: server.id,
                     players: server.playing,
-                    maxPlayers: server.maxPlayers
-                });
+                    maxPlayers: server.maxPlayers,
+                    fps: server.fps,
+                    ping: server.ping
+                };
+                
+                serverData.score = calculateServerScore(serverData);
+                
+                newPool.push(serverData);
+                
+                if (server.fps) sumFps += server.fps;
+                if (server.ping) sumPing += server.ping;
+                sumScore += serverData.score;
             }
         }
         
@@ -142,9 +218,26 @@ async function scanPool(poolKey) {
         await new Promise(r => setTimeout(r, 200));
     }
     
+    newPool.sort((a, b) => b.score - a.score);
+    
     pools[poolKey] = newPool;
+    
+    if (newPool.length > 0) {
+        poolQualityStats[poolKey] = {
+            avgFps: Math.round((sumFps / newPool.length) * 10) / 10,
+            avgPing: Math.round(sumPing / newPool.length),
+            avgScore: Math.round(sumScore / newPool.length),
+            filtered: filteredOut,
+            total: totalScanned
+        };
+    }
+    
     stats.totalScans++;
-    console.log('[SCAN] ' + config.label + ': ' + newPool.length + ' serveurs');
+    
+    const topScore = newPool.length > 0 ? newPool[0].score : 0;
+    const bottomScore = newPool.length > 0 ? newPool[newPool.length - 1].score : 0;
+    
+    console.log('[SCAN] ' + config.label + ': ' + newPool.length + ' serveurs (filtre: ' + filteredOut + ') | FPS moy: ' + poolQualityStats[poolKey].avgFps + ' | Ping moy: ' + poolQualityStats[poolKey].avgPing + 'ms | Score top: ' + topScore + ' bottom: ' + bottomScore);
 }
 
 async function scanLoop() {
@@ -161,23 +254,27 @@ async function scanLoop() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════
+// ============================================================
 // ENDPOINTS
-// ═══════════════════════════════════════════════════════════════
+// ============================================================
 
 app.get('/', (req, res) => {
     res.json({
         name: 'Godzilla Notifier Backend',
-        version: '5.0 FINAL',
+        version: '6.0 OPTI MAX',
         config: {
             players: MIN_PLAYERS + '-' + MAX_PLAYERS,
+            scanInterval: SCAN_INTERVAL + 'ms',
             maxPages: MAX_PAGES,
-            excludeFullGames: true,
+            jobIdLockTTL: JOBID_LOCK_TTL + 'ms',
+            filteringEnabled: FILTERING_ENABLED,
+            minFps: MIN_FPS,
+            maxPing: MAX_PING,
+            topDistributionRatio: (TOP_DISTRIBUTION_RATIO * 100) + '%',
             brainrotTTL: BRAINROT_TTL / 1000 + 's',
-            minBrainrotValue: (MIN_BRAINROT_VALUE / 1000000) + 'M',
-            uniqueJobIDs: true
+            minBrainrotValue: (MIN_BRAINROT_VALUE / 1000000) + 'M'
         },
-        endpoints: ['/health', '/jobs', '/report-data', '/log', '/stats', '/bots', '/dashboard', '/api/brainrots']
+        endpoints: ['/health', '/jobs', '/report-data', '/log', '/stats', '/bots', '/dashboard', '/api/brainrots', '/pool-quality', '/live-monitor']
     });
 });
 
@@ -192,7 +289,6 @@ app.get('/health', (req, res) => {
     });
 });
 
-// ✅ MODIFIÉ: RETIRE LE JOBID DU POOL APRÈS DISTRIBUTION
 app.get('/jobs', (req, res) => {
     if (!checkAuth(req, res)) return;
     
@@ -236,14 +332,23 @@ app.get('/jobs', (req, res) => {
         return res.status(503).send('All visited');
     }
     
-    const selected = candidates[Math.floor(Math.random() * candidates.length)];
+    let selected;
+    const useTopScore = Math.random() < TOP_DISTRIBUTION_RATIO;
     
-    // ✅ NOUVEAU: RETIRER LE JOBID DU POOL (plus jamais redistribué)
+    if (useTopScore && candidates.length > 0) {
+        const topSize = Math.max(1, Math.floor(candidates.length * 0.3));
+        const topCandidates = candidates.slice(0, topSize);
+        selected = topCandidates[Math.floor(Math.random() * topCandidates.length)];
+        stats.jobsServedTopScore++;
+    } else {
+        selected = candidates[Math.floor(Math.random() * candidates.length)];
+        stats.jobsServedRandom++;
+    }
+    
     const poolArray = pools[poolKey];
     const poolIndex = poolArray.findIndex(s => s.jobId === selected.jobId);
     if (poolIndex !== -1) {
         poolArray.splice(poolIndex, 1);
-        console.log('[JOBS] JobID retiré du pool. Reste:', poolArray.length);
     }
     
     jobLocks.set(selected.jobId, {
@@ -255,10 +360,13 @@ app.get('/jobs', (req, res) => {
     botData.visitedJobs.add(selected.jobId);
     stats.jobsServed++;
     
+    const fpsStr = selected.fps ? selected.fps.toFixed(1) : 'N/A';
+    const pingStr = selected.ping !== undefined ? selected.ping + 'ms' : 'N/A';
+    console.log('[JOBS] ' + username + ' -> ' + selected.jobId.substring(0, 12) + '... | FPS:' + fpsStr + ' Ping:' + pingStr + ' Score:' + selected.score + ' Players:' + selected.players + '/8 (' + (useTopScore ? 'TOP' : 'RND') + ') | Pool reste: ' + poolArray.length);
+    
     res.send(selected.jobId);
 });
 
-// ✅ MODIFIÉ: Stocke le nombre de joueurs
 app.post('/report-data', (req, res) => {
     if (!checkAuth(req, res)) return;
     
@@ -279,6 +387,8 @@ app.post('/report-data', (req, res) => {
     
     stats.reportsReceived++;
     
+    let hasValidBrainrot = false;
+    
     const report = {
         botName: botName,
         jobId: jobId,
@@ -294,25 +404,20 @@ app.post('/report-data', (req, res) => {
     
     reports.set(botName + ':' + jobId, report);
     
-    // ✅ MODIFIÉ: Ajoute TOUS les brainrots du tableau + players
-    // ✅ FILTRE: Ne garde que les brainrots >= MIN_BRAINROT_VALUE
-    // ✅ ANTI-DOUBLONS: Skip si même name + numeric + JobID existe déjà
     if (Array.isArray(brainrots) && brainrots.length > 0) {
         const now = Date.now();
         
         for (const item of brainrots) {
-            // ✅ Filtre par valeur minimale
             if (item.numeric >= MIN_BRAINROT_VALUE && item.name) {
+                hasValidBrainrot = true;
                 
-                // ✅ ANTI-DOUBLONS: Vérifie si ce brainrot existe déjà (même serveur)
                 const isDuplicate = recentBrainrots.some(existing => 
                     existing.name === item.name && 
                     existing.numeric === item.numeric &&
-                    existing.jobId === jobId &&  // ✅ Même JobID = même serveur
-                    existing.expiresAt > now  // Encore actif
+                    existing.jobId === jobId &&
+                    existing.expiresAt > now
                 );
                 
-                // ✅ N'ajoute que si pas un doublon
                 if (!isDuplicate) {
                     recentBrainrots.unshift({
                         botName: botName,
@@ -329,10 +434,9 @@ app.post('/report-data', (req, res) => {
                 }
             }
         }
-        
-        // ✅ PAS DE LIMITE MAX - INFINI
-        // (Suppression de la limite de 500)
     }
+    
+    if (hasValidBrainrot) stats.reportsWithBrainrots++;
     
     res.json({ success: true });
 });
@@ -363,12 +467,19 @@ app.post('/log', (req, res) => {
 
 app.get('/stats', (req, res) => {
     const uptime = Math.floor((Date.now() - stats.startedAt) / 1000);
+    const uptimeMin = uptime / 60;
     
     res.json({
         uptime: uptime,
         totalScans: stats.totalScans,
         jobsServed: stats.jobsServed,
+        jobsServedTopScore: stats.jobsServedTopScore,
+        jobsServedRandom: stats.jobsServedRandom,
+        jobsPerMinute: uptimeMin > 0 ? Math.round(stats.jobsServed / uptimeMin) : 0,
         reportsReceived: stats.reportsReceived,
+        reportsWithBrainrots: stats.reportsWithBrainrots,
+        reportsHitRate: stats.reportsReceived > 0 ? Math.round((stats.reportsWithBrainrots / stats.reportsReceived) * 100) + '%' : '0%',
+        reportsPerMinute: uptimeMin > 0 ? Math.round(stats.reportsReceived / uptimeMin) : 0,
         logsReceived: stats.logsReceived,
         activeBots: botHistory.size,
         activeJobs: jobLocks.size,
@@ -376,8 +487,46 @@ app.get('/stats', (req, res) => {
         pools: {
             rebirth0: pools.rebirth0.length,
             rebirth1plus: pools.rebirth1plus.length
+        },
+        quality: poolQualityStats,
+        config: {
+            filteringEnabled: FILTERING_ENABLED,
+            minFps: MIN_FPS,
+            maxPing: MAX_PING,
+            topRatio: TOP_DISTRIBUTION_RATIO
         }
     });
+});
+
+app.get('/pool-quality', (req, res) => {
+    const result = {};
+    
+    for (const [poolKey, pool] of Object.entries(pools)) {
+        const top10 = pool.slice(0, 10).map(s => ({
+            jobId: s.jobId.substring(0, 16) + '...',
+            score: s.score,
+            fps: s.fps ? Math.round(s.fps * 10) / 10 : null,
+            ping: s.ping,
+            players: s.players
+        }));
+        
+        const bottom10 = pool.slice(-10).reverse().map(s => ({
+            jobId: s.jobId.substring(0, 16) + '...',
+            score: s.score,
+            fps: s.fps ? Math.round(s.fps * 10) / 10 : null,
+            ping: s.ping,
+            players: s.players
+        }));
+        
+        result[poolKey] = {
+            total: pool.length,
+            quality: poolQualityStats[poolKey],
+            top10: top10,
+            bottom10: bottom10
+        };
+    }
+    
+    res.json(result);
 });
 
 app.get('/bots', (req, res) => {
@@ -412,11 +561,13 @@ app.get('/pool', (req, res) => {
         return res.json({
             rebirth0: {
                 placeId: POOL_CONFIG.rebirth0.placeId,
-                count: pools.rebirth0.length
+                count: pools.rebirth0.length,
+                quality: poolQualityStats.rebirth0
             },
             rebirth1plus: {
                 placeId: POOL_CONFIG.rebirth1plus.placeId,
-                count: pools.rebirth1plus.length
+                count: pools.rebirth1plus.length,
+                quality: poolQualityStats.rebirth1plus
             }
         });
     }
@@ -425,11 +576,11 @@ app.get('/pool', (req, res) => {
     res.json({
         placeId: POOL_CONFIG[poolKey].placeId,
         count: pool.length,
-        servers: pool
+        quality: poolQualityStats[poolKey],
+        servers: pool.slice(0, 50)
     });
 });
 
-// ✅ API brainrots avec players
 app.get('/api/brainrots', (req, res) => {
     const now = Date.now();
     const active = [];
@@ -453,599 +604,41 @@ app.get('/api/brainrots', (req, res) => {
     res.json(active);
 });
 
-// ✅ DASHBOARD ULTRA PREMIUM AVEC PLAYERS
+// ============================================================
+// LIVE MONITOR DASHBOARD
+// ============================================================
+app.get('/live-monitor', (req, res) => {
+    res.send('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Live Monitor</title><style>* { margin: 0; padding: 0; box-sizing: border-box; } body { font-family: Courier New, monospace; background: #0a0a0a; color: #00ff00; padding: 20px; } h1 { text-align: center; margin-bottom: 20px; text-shadow: 0 0 10px #00ff00; } .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; margin-bottom: 20px; } .box { background: #111; border: 1px solid #00ff00; padding: 15px; } .box h3 { color: #ffff00; margin-bottom: 10px; font-size: 14px; } .box .val { font-size: 32px; font-weight: bold; } .box .sub { font-size: 11px; opacity: 0.7; margin-top: 5px; } table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 11px; } th, td { padding: 4px 8px; text-align: left; border-bottom: 1px solid #002200; } th { background: #001100; color: #ffff00; } .good { color: #00ff00; } .bad { color: #ff0000; } .warn { color: #ffaa00; } .refresh { text-align: center; opacity: 0.5; font-size: 10px; margin-top: 20px; }</style></head><body><h1>GODZILLA OPTI MAX - LIVE MONITOR</h1><div id="content">Loading...</div><div class="refresh">Auto-refresh: 2s</div><script>async function refresh(){const[s,q,b]=await Promise.all([fetch("/stats").then(r=>r.json()),fetch("/pool-quality").then(r=>r.json()),fetch("/bots").then(r=>r.json())]);const u=Math.floor(s.uptime/60)+"min";const ab=b.filter(x=>x.secondsSinceLastSeen<30).length;const ib=b.length-ab;let h=\'<div class="grid">\';h+=\'<div class="box"><h3>VITESSE</h3><div class="val">\'+s.jobsPerMinute+\'</div><div class="sub">jobs/minute</div></div>\';h+=\'<div class="box"><h3>HIT RATE</h3><div class="val \'+(parseInt(s.reportsHitRate)>30?"good":"warn")+\'">\'+s.reportsHitRate+\'</div><div class="sub">reports avec brainrot</div></div>\';h+=\'<div class="box"><h3>BOTS ACTIFS</h3><div class="val">\'+ab+\'/\'+b.length+\'</div><div class="sub">idle: \'+ib+\'</div></div>\';h+=\'<div class="box"><h3>UPTIME</h3><div class="val">\'+u+\'</div><div class="sub">\'+s.totalScans+\' scans</div></div>\';h+=\'<div class="box"><h3>DISTRIB TOP/RANDOM</h3><div class="val">\'+s.jobsServedTopScore+\' / \'+s.jobsServedRandom+\'</div><div class="sub">\'+Math.round(s.jobsServedTopScore/Math.max(1,s.jobsServed)*100)+\'% top score</div></div>\';h+=\'<div class="box"><h3>BRAINROTS LIVE</h3><div class="val good">\'+s.recentBrainrots+\'</div><div class="sub">actifs TTL 30s</div></div>\';h+=\'</div>\';h+=\'<div class="grid">\';const q0=q.rebirth0;h+=\'<div class="box"><h3>REBIRTH 0 - POOL QUALITY</h3>\';h+=\'<div>Pool size: <b>\'+q0.total+\'</b></div>\';h+=\'<div>FPS moyen: <b class="\'+(q0.quality.avgFps>50?"good":"warn")+\'">\'+q0.quality.avgFps+\'</b></div>\';h+=\'<div>Ping moyen: <b class="\'+(q0.quality.avgPing<200?"good":"warn")+\'">\'+q0.quality.avgPing+\'ms</b></div>\';h+=\'<div>Score moyen: <b>\'+q0.quality.avgScore+\'</b></div>\';h+=\'<div>Filtres: <b class="bad">\'+q0.quality.filtered+\'</b> / \'+q0.quality.total+\'</div>\';h+=\'<h3 style="margin-top:10px;">TOP 5 JOBS</h3><table><tr><th>Score</th><th>FPS</th><th>Ping</th><th>Players</th></tr>\';q0.top10.slice(0,5).forEach(x=>{h+=\'<tr><td class="good">\'+x.score+\'</td><td>\'+(x.fps||"N/A")+\'</td><td>\'+(x.ping||"N/A")+\'ms</td><td>\'+x.players+\'/8</td></tr>\';});h+=\'</table></div>\';const q1=q.rebirth1plus;h+=\'<div class="box"><h3>REBIRTH 1+ - POOL QUALITY</h3>\';h+=\'<div>Pool size: <b>\'+q1.total+\'</b></div>\';h+=\'<div>FPS moyen: <b class="\'+(q1.quality.avgFps>50?"good":"warn")+\'">\'+q1.quality.avgFps+\'</b></div>\';h+=\'<div>Ping moyen: <b class="\'+(q1.quality.avgPing<200?"good":"warn")+\'">\'+q1.quality.avgPing+\'ms</b></div>\';h+=\'<div>Score moyen: <b>\'+q1.quality.avgScore+\'</b></div>\';h+=\'<div>Filtres: <b class="bad">\'+q1.quality.filtered+\'</b> / \'+q1.quality.total+\'</div>\';h+=\'<h3 style="margin-top:10px;">TOP 5 JOBS</h3><table><tr><th>Score</th><th>FPS</th><th>Ping</th><th>Players</th></tr>\';q1.top10.slice(0,5).forEach(x=>{h+=\'<tr><td class="good">\'+x.score+\'</td><td>\'+(x.fps||"N/A")+\'</td><td>\'+(x.ping||"N/A")+\'ms</td><td>\'+x.players+\'/8</td></tr>\';});h+=\'</table></div>\';h+=\'</div>\';h+=\'<div class="box" style="margin-top:15px;"><h3>TOP 10 BOTS</h3><table><tr><th>Bot</th><th>Jobs</th><th>Last seen</th><th>Status</th></tr>\';const sb=[...b].sort((a,c)=>c.jobsReceived-a.jobsReceived).slice(0,10);sb.forEach(x=>{const st=x.secondsSinceLastSeen<15?\'<span class="good">ACTIVE</span>\':x.secondsSinceLastSeen<60?\'<span class="warn">SLOW</span>\':\'<span class="bad">IDLE</span>\';h+=\'<tr><td>\'+x.name+\'</td><td>\'+x.jobsReceived+\'</td><td>\'+x.secondsSinceLastSeen+\'s</td><td>\'+st+\'</td></tr>\';});h+=\'</table></div>\';document.getElementById("content").innerHTML=h;}refresh();setInterval(refresh,2000);</script></body></html>');
+});
+
+// ============================================================
+// DASHBOARD BRAINROTS (preserve)
+// ============================================================
 app.get('/dashboard', (req, res) => {
-    const html = `<!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>🦖 Godzilla Notifier</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box;}
-body{
-    font-family:'SF Mono','Monaco','Inconsolata','Courier New',monospace;
-    background:#000000;
-    color:#00ff00;
-    min-height:100vh;
-    padding:20px;
-    overflow-x:hidden;
-}
-.bg-grid{
-    position:fixed;
-    top:0;
-    left:0;
-    width:100%;
-    height:100%;
-    background-image:
-        linear-gradient(rgba(0,255,0,0.03) 1px,transparent 1px),
-        linear-gradient(90deg,rgba(0,255,0,0.03) 1px,transparent 1px);
-    background-size:50px 50px;
-    z-index:-1;
-    animation:grid-move 20s linear infinite;
-}
-@keyframes grid-move{
-    0%{background-position:0 0;}
-    100%{background-position:50px 50px;}
-}
-.container{
-    max-width:1200px;
-    margin:0 auto;
-    position:relative;
-    z-index:1;
-}
-.header{
-    text-align:center;
-    margin-bottom:40px;
-    padding:30px;
-    background:#000000;
-    border:3px solid #00ff00;
-    position:relative;
-    overflow:hidden;
-}
-.header::before{
-    content:'';
-    position:absolute;
-    top:-50%;
-    left:-50%;
-    width:200%;
-    height:200%;
-    background:repeating-linear-gradient(
-        0deg,
-        transparent,
-        transparent 2px,
-        rgba(0,255,0,0.03) 2px,
-        rgba(0,255,0,0.03) 4px
-    );
-    animation:scan 8s linear infinite;
-}
-@keyframes scan{
-    0%{transform:translateY(0);}
-    100%{transform:translateY(50px);}
-}
-.header-content{
-    position:relative;
-    z-index:1;
-}
-.header h1{
-    font-size:48px;
-    color:#00ff00;
-    text-shadow:
-        0 0 10px #00ff00,
-        0 0 20px #00ff00,
-        0 0 30px #00ff00,
-        0 0 40px #00ff00;
-    margin-bottom:10px;
-    letter-spacing:8px;
-    font-weight:900;
-    animation:glow-pulse 2s ease-in-out infinite;
-}
-@keyframes glow-pulse{
-    0%,100%{text-shadow:0 0 10px #00ff00,0 0 20px #00ff00,0 0 30px #00ff00;}
-    50%{text-shadow:0 0 20px #00ff00,0 0 30px #00ff00,0 0 40px #00ff00,0 0 50px #00ff00;}
-}
-.header .subtitle{
-    font-size:14px;
-    color:#00ff00;
-    opacity:0.8;
-    text-transform:uppercase;
-    letter-spacing:4px;
-    font-weight:600;
-}
-.stats-bar{
-    display:grid;
-    grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
-    gap:15px;
-    margin-bottom:30px;
-}
-.stat-box{
-    background:#000000;
-    border:2px solid #00ff00;
-    padding:15px;
-    text-align:center;
-    position:relative;
-    overflow:hidden;
-}
-.stat-box::before{
-    content:'';
-    position:absolute;
-    top:0;
-    left:-100%;
-    width:100%;
-    height:100%;
-    background:linear-gradient(90deg,transparent,rgba(0,255,0,0.2),transparent);
-    animation:stat-shine 3s infinite;
-}
-@keyframes stat-shine{
-    0%{left:-100%;}
-    100%{left:100%;}
-}
-.stat-label{
-    font-size:10px;
-    opacity:0.7;
-    margin-bottom:5px;
-    letter-spacing:2px;
-}
-.stat-value{
-    font-size:24px;
-    font-weight:900;
-    color:#00ff00;
-    text-shadow:0 0 10px #00ff00;
-}
-.empty{
-    text-align:center;
-    padding:100px 20px;
-    color:#00ff00;
-    font-size:20px;
-    border:3px dashed #00ff00;
-    background:#000000;
-    opacity:0.3;
-    text-transform:uppercase;
-    letter-spacing:3px;
-}
-.brainrot-list{
-    display:grid;
-    gap:20px;
-}
-.brainrot-card{
-    background:#000000;
-    border:3px solid #00ff00;
-    padding:25px;
-    position:relative;
-    overflow:hidden;
-    transition:all 0.3s cubic-bezier(0.4,0,0.2,1);
-    box-shadow:0 0 20px rgba(0,255,0,0.3);
-}
-.brainrot-card::before{
-    content:'';
-    position:absolute;
-    top:0;
-    left:0;
-    width:6px;
-    height:100%;
-    background:#00ff00;
-    box-shadow:0 0 10px #00ff00;
-}
-.top-brainrot::before{
-    background:#ffd700 !important;
-    box-shadow:0 0 15px #ffd700 !important;
-}
-.brainrot-card:hover{
-    transform:translateX(5px);
-    box-shadow:0 0 40px rgba(0,255,0,0.6);
-    border-color:#00ff00;
-}
-.brainrot-header{
-    display:flex;
-    justify-content:space-between;
-    align-items:flex-start;
-    margin-bottom:20px;
-}
-.brainrot-left{
-    flex:1;
-}
-.brainrot-badges{
-    display:flex;
-    gap:8px;
-    margin-bottom:12px;
-    flex-wrap:wrap;
-}
-.badge{
-    display:inline-block;
-    padding:6px 12px;
-    background:#00ff00;
-    color:#000000;
-    font-size:11px;
-    font-weight:900;
-    letter-spacing:1.5px;
-    box-shadow:0 0 10px rgba(0,255,0,0.5);
-}
-.badge.source{
-    background:#00ff00;
-}
-.badge.players{
-    background:#00ff00;
-}
-.badge.top{
-    background:#ffd700;
-    color:#000000;
-    animation:top-glow 1.5s ease-in-out infinite;
-}
-@keyframes top-glow{
-    0%,100%{box-shadow:0 0 10px rgba(255,215,0,0.5);}
-    50%{box-shadow:0 0 20px rgba(255,215,0,1),0 0 30px rgba(255,215,0,0.8);}
-}
-.top-brainrot{
-    border-color:#ffd700 !important;
-    box-shadow:0 0 30px rgba(255,215,0,0.5) !important;
-}
-.top-brainrot:hover{
-    box-shadow:0 0 50px rgba(255,215,0,0.8) !important;
-}
-.brainrot-name{
-    font-size:26px;
-    font-weight:900;
-    color:#ffffff;
-    text-shadow:0 0 15px #00ff00;
-    margin-bottom:8px;
-    line-height:1.2;
-}
-.brainrot-value{
-    font-size:42px;
-    font-weight:900;
-    color:#00ff00;
-    text-shadow:
-        0 0 10px #00ff00,
-        0 0 20px #00ff00,
-        0 0 30px #00ff00;
-    letter-spacing:3px;
-}
-.brainrot-meta{
-    display:flex;
-    gap:20px;
-    font-size:13px;
-    color:#00ff00;
-    opacity:0.8;
-    margin-bottom:15px;
-    flex-wrap:wrap;
-}
-.brainrot-meta span{
-    display:flex;
-    align-items:center;
-    gap:6px;
-}
-.brainrot-footer{
-    display:flex;
-    gap:12px;
-    align-items:center;
-}
-.btn-join{
-    background:#00ff00;
-    color:#000000;
-    border:none;
-    padding:12px 30px;
-    font-size:16px;
-    font-weight:900;
-    cursor:pointer;
-    transition:all 0.2s;
-    letter-spacing:2px;
-    font-family:inherit;
-    box-shadow:0 0 15px rgba(0,255,0,0.5);
-    position:relative;
-    overflow:hidden;
-}
-.btn-join::before{
-    content:'';
-    position:absolute;
-    top:50%;
-    left:50%;
-    width:0;
-    height:0;
-    background:rgba(255,255,255,0.3);
-    border-radius:50%;
-    transform:translate(-50%,-50%);
-    transition:width 0.6s,height 0.6s;
-}
-.btn-join:hover::before{
-    width:300px;
-    height:300px;
-}
-.btn-join:hover{
-    transform:scale(1.05);
-    box-shadow:0 0 30px rgba(0,255,0,0.8);
-}
-.btn-join:active{
-    transform:scale(0.95);
-}
-.brainrot-timer{
-    background:#000000;
-    border:2px solid #00ff00;
-    padding:8px 16px;
-    font-size:18px;
-    font-weight:900;
-    min-width:70px;
-    text-align:center;
-    box-shadow:0 0 10px rgba(0,255,0,0.3);
-}
-.timer-fresh{color:#00ff00;}
-.timer-medium{color:#ffaa00;}
-.timer-expiring{
-    color:#ff5555;
-    animation:timer-pulse 0.5s infinite;
-}
-@keyframes timer-pulse{
-    0%,100%{opacity:1;transform:scale(1);}
-    50%{opacity:0.5;transform:scale(1.1);}
-}
-.brainrot-progress{
-    position:absolute;
-    bottom:0;
-    left:0;
-    height:5px;
-    background:#00ff00;
-    transition:width 1s linear;
-    box-shadow:0 0 15px #00ff00;
-}
-.footer{
-    text-align:center;
-    margin-top:50px;
-    padding:25px;
-    color:#00ff00;
-    font-size:12px;
-    opacity:0.4;
-    border-top:2px solid #00ff00;
-    text-transform:uppercase;
-    letter-spacing:3px;
-}
-.copied-toast{
-    position:fixed;
-    top:30px;
-    right:30px;
-    background:#00ff00;
-    color:#000000;
-    padding:20px 30px;
-    font-weight:900;
-    font-size:16px;
-    box-shadow:0 0 40px rgba(0,255,0,1);
-    z-index:9999;
-    animation:toast-in 0.3s ease;
-    border:3px solid #000000;
-}
-@keyframes toast-in{
-    from{transform:translateX(500px);opacity:0;}
-    to{transform:translateX(0);opacity:1;}
-}
-</style>
-</head>
-<body>
-<div class="bg-grid"></div>
-<div class="container">
-    <div class="header">
-        <div class="header-content">
-            <h1>🦖 GODZILLA NOTIFIER</h1>
-            <div class="subtitle">BRAINROTS LIVE — TTL 30 SECONDES</div>
-        </div>
-    </div>
-    
-    <div class="stats-bar" id="stats-bar" style="display:none;">
-        <div class="stat-box">
-            <div class="stat-label">TOTAL BRAINROTS</div>
-            <div class="stat-value" id="stat-total">0</div>
-        </div>
-        <div class="stat-box">
-            <div class="stat-label">ACTIFS (< 15S)</div>
-            <div class="stat-value" id="stat-active">0</div>
-        </div>
-        <div class="stat-box">
-            <div class="stat-label">EXPIRANT (< 10S)</div>
-            <div class="stat-value" id="stat-expiring">0</div>
-        </div>
-    </div>
-    
-    <div id="brainrots-container">
-        <div class="empty">EN ATTENTE DE BRAINROTS...</div>
-    </div>
-    
-    <div class="footer">
-        Dev by SALAH ⚡ | Auto-refresh: 1s | JobID unique par bot
-    </div>
-</div>
-
-<script>
-function formatMoney(money) {
-    // Si money est déjà une string formatée, on la retourne
-    if (typeof money === 'string' && money.startsWith('$')) {
-        return money;
-    }
-    
-    // Sinon on formate à partir de numeric
-    return money || '$0/s';
-}
-
-function formatNumeric(num) {
-    if (!num || num === 0) return '$0/s';
-    
-    const absNum = Math.abs(num);
-    let formatted;
-    
-    if (absNum >= 1e12) {
-        // Trillions
-        formatted = '$' + (num / 1e12).toFixed(1) + 'T/s';
-    } else if (absNum >= 1e9) {
-        // Billions
-        formatted = '$' + (num / 1e9).toFixed(1) + 'B/s';
-    } else if (absNum >= 1e6) {
-        // Millions
-        formatted = '$' + (num / 1e6).toFixed(1) + 'M/s';
-    } else if (absNum >= 1e3) {
-        // Thousands
-        formatted = '$' + (num / 1e3).toFixed(1) + 'K/s';
-    } else {
-        // Less than 1000
-        formatted = '$' + num.toFixed(0) + '/s';
-    }
-    
-    // Supprimer les .0 inutiles
-    return formatted.replace('.0', '');
-}
-
-function copyToClipboard(text) {
-    navigator.clipboard.writeText(text).then(() => {
-        showToast('✅ JOBID COPIÉ !');
-    }).catch(() => {
-        showToast('❌ ERREUR COPIE');
-    });
-}
-
-function showToast(message) {
-    const existing = document.querySelector('.copied-toast');
-    if (existing) existing.remove();
-    
-    const toast = document.createElement('div');
-    toast.className = 'copied-toast';
-    toast.textContent = message;
-    document.body.appendChild(toast);
-    setTimeout(() => toast.remove(), 2500);
-}
-
-function updateStats(brainrots) {
-    if (!brainrots || brainrots.length === 0) {
-        document.getElementById('stats-bar').style.display = 'none';
-        return;
-    }
-    
-    document.getElementById('stats-bar').style.display = 'grid';
-    
-    const total = brainrots.length;
-    const active = brainrots.filter(b => b.remainingSeconds >= 15).length;
-    const expiring = brainrots.filter(b => b.remainingSeconds < 10).length;
-    
-    document.getElementById('stat-total').textContent = total;
-    document.getElementById('stat-active').textContent = active;
-    document.getElementById('stat-expiring').textContent = expiring;
-}
-
-function renderBrainrots(brainrots) {
-    const container = document.getElementById('brainrots-container');
-    
-    if (!brainrots || brainrots.length === 0) {
-        container.innerHTML = '<div class="empty">EN ATTENTE DE BRAINROTS...</div>';
-        updateStats(null);
-        return;
-    }
-    
-    updateStats(brainrots);
-    
-    // ✅ TRI PAR VALEUR DÉCROISSANTE (du plus gros au plus petit)
-    const sortedBrainrots = brainrots.sort((a, b) => b.numeric - a.numeric);
-    
-    const list = document.createElement('div');
-    list.className = 'brainrot-list';
-    
-    sortedBrainrots.forEach((b, index) => {
-        const remaining = b.remainingSeconds || 0;
-        const timerClass = remaining < 10 ? 'timer-expiring' : remaining < 20 ? 'timer-medium' : 'timer-fresh';
-        const progressWidth = (remaining / 30) * 100;
-        
-        const card = document.createElement('div');
-        card.className = 'brainrot-card';
-        card.dataset.expiresAt = Date.now() + (remaining * 1000);
-        
-        // ✅ Ajouter classe spéciale pour le TOP 1
-        if (index === 0) {
-            card.classList.add('top-brainrot');
-        }
-        
-        const mutationTag = b.mutation && b.mutation !== 'None' ? '[' + b.mutation + '] ' : '';
-        const sourceTag = (b.source === 'carpet' ? 'CARPET' : b.source === 'plot' ? 'PLOT' : 'UNKNOWN').toUpperCase();
-        const playersText = (b.players || 0) + '/8';
-        
-        // ✅ Badge TOP pour le meilleur
-        const topBadge = index === 0 ? '<span class="badge top">🏆 TOP</span>' : '';
-        
-        card.innerHTML = \`
-            <div class="brainrot-header">
-                <div class="brainrot-left">
-                    <div class="brainrot-badges">
-                        \${topBadge}
-                        <span class="badge source">\${sourceTag}</span>
-                        <span class="badge players">👥 \${playersText}</span>
-                    </div>
-                    <div class="brainrot-name">\${mutationTag}\${b.name}</div>
-                </div>
-                <div class="brainrot-value">\${formatNumeric(b.numeric)}</div>
-            </div>
-            <div class="brainrot-meta">
-                <span>🤖 \${b.botName}</span>
-                <span>🎮 \${b.jobId.substring(0, 16)}...</span>
-            </div>
-            <div class="brainrot-footer">
-                <button class="btn-join" onclick="copyToClipboard('\${b.jobId}')">JOIN</button>
-                <div class="brainrot-timer \${timerClass}">\${remaining}s</div>
-            </div>
-            <div class="brainrot-progress" style="width:\${progressWidth}%"></div>
-        \`;
-        
-        list.appendChild(card);
-    });
-    
-    container.innerHTML = '';
-    container.appendChild(list);
-}
-
-function fetchBrainrots() {
-    fetch('/api/brainrots')
-        .then(r => r.json())
-        .then(data => renderBrainrots(data))
-        .catch(e => console.error('Fetch error:', e));
-}
-
-setInterval(() => {
-    document.querySelectorAll('.brainrot-card').forEach(card => {
-        const expiresAt = parseInt(card.dataset.expiresAt);
-        if (!expiresAt) return;
-        
-        const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
-        const timerEl = card.querySelector('.brainrot-timer');
-        const progressEl = card.querySelector('.brainrot-progress');
-        
-        if (timerEl) {
-            timerEl.textContent = remaining + 's';
-            timerEl.className = 'brainrot-timer ' + (remaining < 10 ? 'timer-expiring' : remaining < 20 ? 'timer-medium' : 'timer-fresh');
-        }
-        
-        if (progressEl) {
-            progressEl.style.width = ((remaining / 30) * 100) + '%';
-        }
-        
-        if (remaining <= 0) {
-            card.style.opacity = '0';
-            card.style.transform = 'translateX(-20px)';
-            setTimeout(() => card.remove(), 300);
-        }
-    });
-}, 1000);
-
-fetchBrainrots();
-setInterval(fetchBrainrots, 1000);
-</script>
-</body>
-</html>`;
-    
-    res.send(html);
+    res.send('<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Godzilla Notifier</title><style>*{margin:0;padding:0;box-sizing:border-box;}body{font-family:SF Mono,Monaco,Inconsolata,Courier New,monospace;background:#000000;color:#00ff00;min-height:100vh;padding:20px;overflow-x:hidden;}.bg-grid{position:fixed;top:0;left:0;width:100%;height:100%;background-image:linear-gradient(rgba(0,255,0,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,0,0.03) 1px,transparent 1px);background-size:50px 50px;z-index:-1;}.container{max-width:1200px;margin:0 auto;position:relative;z-index:1;}.header{text-align:center;margin-bottom:40px;padding:30px;background:#000000;border:3px solid #00ff00;position:relative;overflow:hidden;}.header h1{font-size:48px;color:#00ff00;text-shadow:0 0 10px #00ff00,0 0 20px #00ff00,0 0 30px #00ff00,0 0 40px #00ff00;margin-bottom:10px;letter-spacing:8px;font-weight:900;}.header .subtitle{font-size:14px;color:#00ff00;opacity:0.8;text-transform:uppercase;letter-spacing:4px;font-weight:600;}.stats-bar{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:15px;margin-bottom:30px;}.stat-box{background:#000000;border:2px solid #00ff00;padding:15px;text-align:center;}.stat-label{font-size:10px;opacity:0.7;margin-bottom:5px;letter-spacing:2px;}.stat-value{font-size:24px;font-weight:900;color:#00ff00;text-shadow:0 0 10px #00ff00;}.empty{text-align:center;padding:100px 20px;color:#00ff00;font-size:20px;border:3px dashed #00ff00;background:#000000;opacity:0.3;text-transform:uppercase;letter-spacing:3px;}.brainrot-list{display:grid;gap:20px;}.brainrot-card{background:#000000;border:3px solid #00ff00;padding:25px;position:relative;overflow:hidden;box-shadow:0 0 20px rgba(0,255,0,0.3);}.brainrot-card::before{content:"";position:absolute;top:0;left:0;width:6px;height:100%;background:#00ff00;box-shadow:0 0 10px #00ff00;}.top-brainrot::before{background:#ffd700 !important;box-shadow:0 0 15px #ffd700 !important;}.brainrot-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;}.brainrot-left{flex:1;}.brainrot-badges{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;}.badge{display:inline-block;padding:6px 12px;background:#00ff00;color:#000000;font-size:11px;font-weight:900;letter-spacing:1.5px;}.badge.top{background:#ffd700;color:#000000;}.top-brainrot{border-color:#ffd700 !important;box-shadow:0 0 30px rgba(255,215,0,0.5) !important;}.brainrot-name{font-size:26px;font-weight:900;color:#ffffff;text-shadow:0 0 15px #00ff00;margin-bottom:8px;line-height:1.2;}.brainrot-value{font-size:42px;font-weight:900;color:#00ff00;text-shadow:0 0 10px #00ff00,0 0 20px #00ff00,0 0 30px #00ff00;letter-spacing:3px;}.brainrot-meta{display:flex;gap:20px;font-size:13px;color:#00ff00;opacity:0.8;margin-bottom:15px;flex-wrap:wrap;}.brainrot-footer{display:flex;gap:12px;align-items:center;}.btn-join{background:#00ff00;color:#000000;border:none;padding:12px 30px;font-size:16px;font-weight:900;cursor:pointer;letter-spacing:2px;font-family:inherit;box-shadow:0 0 15px rgba(0,255,0,0.5);}.btn-join:hover{transform:scale(1.05);box-shadow:0 0 30px rgba(0,255,0,0.8);}.brainrot-timer{background:#000000;border:2px solid #00ff00;padding:8px 16px;font-size:18px;font-weight:900;min-width:70px;text-align:center;}.timer-fresh{color:#00ff00;}.timer-medium{color:#ffaa00;}.timer-expiring{color:#ff5555;}.brainrot-progress{position:absolute;bottom:0;left:0;height:5px;background:#00ff00;}.footer{text-align:center;margin-top:50px;padding:25px;color:#00ff00;font-size:12px;opacity:0.4;border-top:2px solid #00ff00;text-transform:uppercase;letter-spacing:3px;}.copied-toast{position:fixed;top:30px;right:30px;background:#00ff00;color:#000000;padding:20px 30px;font-weight:900;font-size:16px;z-index:9999;border:3px solid #000000;}</style></head><body><div class="bg-grid"></div><div class="container"><div class="header"><h1>GODZILLA NOTIFIER</h1><div class="subtitle">OPTI MAX v6.0 - SCORING FPS/PING</div></div><div class="stats-bar" id="stats-bar" style="display:none;"><div class="stat-box"><div class="stat-label">TOTAL BRAINROTS</div><div class="stat-value" id="stat-total">0</div></div><div class="stat-box"><div class="stat-label">ACTIFS</div><div class="stat-value" id="stat-active">0</div></div><div class="stat-box"><div class="stat-label">EXPIRANT</div><div class="stat-value" id="stat-expiring">0</div></div></div><div id="brainrots-container"><div class="empty">EN ATTENTE DE BRAINROTS...</div></div><div class="footer">Dev by SALAH | OPTI MAX v6.0 | Live Monitor: /live-monitor</div></div><script>function formatNumeric(n){if(!n||n===0)return"$0/s";const a=Math.abs(n);let f;if(a>=1e12)f="$"+(n/1e12).toFixed(1)+"T/s";else if(a>=1e9)f="$"+(n/1e9).toFixed(1)+"B/s";else if(a>=1e6)f="$"+(n/1e6).toFixed(1)+"M/s";else if(a>=1e3)f="$"+(n/1e3).toFixed(1)+"K/s";else f="$"+n.toFixed(0)+"/s";return f.replace(".0","");}function copyToClipboard(t){navigator.clipboard.writeText(t).then(()=>showToast("JOBID COPIE")).catch(()=>showToast("ERREUR"));}function showToast(m){const e=document.querySelector(".copied-toast");if(e)e.remove();const t=document.createElement("div");t.className="copied-toast";t.textContent=m;document.body.appendChild(t);setTimeout(()=>t.remove(),2500);}function updateStats(b){if(!b||b.length===0){document.getElementById("stats-bar").style.display="none";return;}document.getElementById("stats-bar").style.display="grid";document.getElementById("stat-total").textContent=b.length;document.getElementById("stat-active").textContent=b.filter(x=>x.remainingSeconds>=15).length;document.getElementById("stat-expiring").textContent=b.filter(x=>x.remainingSeconds<10).length;}function renderBrainrots(b){const c=document.getElementById("brainrots-container");if(!b||b.length===0){c.innerHTML=\'<div class="empty">EN ATTENTE DE BRAINROTS...</div>\';updateStats(null);return;}updateStats(b);const s=b.sort((x,y)=>y.numeric-x.numeric);const l=document.createElement("div");l.className="brainrot-list";s.forEach((x,i)=>{const r=x.remainingSeconds||0;const tc=r<10?"timer-expiring":r<20?"timer-medium":"timer-fresh";const pw=(r/30)*100;const cd=document.createElement("div");cd.className="brainrot-card";if(i===0)cd.classList.add("top-brainrot");cd.dataset.expiresAt=Date.now()+(r*1000);const mt=x.mutation&&x.mutation!=="None"?"["+x.mutation+"] ":"";const st=(x.source==="carpet"?"CARPET":x.source==="plot"?"PLOT":"UNKNOWN").toUpperCase();const pt=(x.players||0)+"/8";const tb=i===0?\'<span class="badge top">TOP</span>\':"";cd.innerHTML=\'<div class="brainrot-header"><div class="brainrot-left"><div class="brainrot-badges">\'+tb+\'<span class="badge">\'+st+\'</span><span class="badge">\'+pt+\'</span></div><div class="brainrot-name">\'+mt+x.name+\'</div></div><div class="brainrot-value">\'+formatNumeric(x.numeric)+\'</div></div><div class="brainrot-meta"><span>BOT: \'+x.botName+\'</span><span>JOB: \'+x.jobId.substring(0,16)+\'...</span></div><div class="brainrot-footer"><button class="btn-join" onclick="copyToClipboard(\\\'\'+x.jobId+\'\\\')">JOIN</button><div class="brainrot-timer \'+tc+\'">\'+r+\'s</div></div><div class="brainrot-progress" style="width:\'+pw+\'%"></div>\';l.appendChild(cd);});c.innerHTML="";c.appendChild(l);}function fetchBrainrots(){fetch("/api/brainrots").then(r=>r.json()).then(d=>renderBrainrots(d)).catch(e=>console.error(e));}setInterval(()=>{document.querySelectorAll(".brainrot-card").forEach(c=>{const e=parseInt(c.dataset.expiresAt);if(!e)return;const r=Math.max(0,Math.ceil((e-Date.now())/1000));const te=c.querySelector(".brainrot-timer");const pe=c.querySelector(".brainrot-progress");if(te){te.textContent=r+"s";te.className="brainrot-timer "+(r<10?"timer-expiring":r<20?"timer-medium":"timer-fresh");}if(pe)pe.style.width=((r/30)*100)+"%";if(r<=0){c.style.opacity="0";c.style.transform="translateX(-20px)";setTimeout(()=>c.remove(),300);}});},1000);fetchBrainrots();setInterval(fetchBrainrots,1000);</script></body></html>');
 });
 
 app.listen(PORT, () => {
-    console.log('===============================================');
-    console.log('🦖 Godzilla Notifier Backend v5.0 FINAL');
-    console.log('===============================================');
+    console.log('================================================');
+    console.log('GODZILLA NOTIFIER BACKEND v6.0 OPTI MAX');
+    console.log('================================================');
     console.log('Port: ' + PORT);
     console.log('Players: ' + MIN_PLAYERS + '-' + MAX_PLAYERS);
-    console.log('Brainrot TTL: ' + (BRAINROT_TTL / 1000) + 's');
-    console.log('Min value: ' + (MIN_BRAINROT_VALUE / 1000000) + 'M');
-    console.log('Pages scan: ' + MAX_PAGES);
-    console.log('JobID unique: OUI');
-    console.log('===============================================');
+    console.log('SCAN_INTERVAL: ' + SCAN_INTERVAL + 'ms');
+    console.log('MAX_PAGES: ' + MAX_PAGES);
+    console.log('JOBID_LOCK_TTL: ' + JOBID_LOCK_TTL + 'ms');
+    console.log('FILTERING_ENABLED: ' + FILTERING_ENABLED);
+    console.log('MIN_FPS: ' + MIN_FPS);
+    console.log('MAX_PING: ' + MAX_PING + 'ms');
+    console.log('TOP_RATIO: ' + (TOP_DISTRIBUTION_RATIO * 100) + '%');
+    console.log('================================================');
+    console.log('Endpoints:');
+    console.log('  /dashboard      - Dashboard brainrots');
+    console.log('  /live-monitor   - Monitoring temps reel (NOUVEAU)');
+    console.log('  /stats          - Stats JSON');
+    console.log('  /pool-quality   - Qualite des pools (NOUVEAU)');
+    console.log('  /bots           - Liste des bots');
+    console.log('================================================');
     
     scanLoop();
 });
