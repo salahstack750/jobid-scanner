@@ -28,6 +28,7 @@ const TOP_DISTRIBUTION_RATIO = 0.7;
 
 // CASCADE FALLBACK — essaie chaque proxy dans l'ordre
 const PROXIES = [
+    'https://calm-glade-1ffa.jedab27255.workers.dev',
     'https://roblox-proxy.salahelarabi03.workers.dev',
     'https://games.roproxy.com',
     'https://games.roblox.com'
