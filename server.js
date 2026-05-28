@@ -131,23 +131,40 @@ function checkAuth(req, res) {
 
 async function fetchPage(url, proxyStr, workerId) {
     const delay = scraperDelays[workerId] || 200;
-    try {
-        const config = {
-            timeout: 12000,
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Accept': 'application/json' }
-        };
-        if (proxyStr) {
+    const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Accept': 'application/json' };
+
+    // Essai 1 — via proxy (si dispo)
+    if (proxyStr) {
+        try {
             const agent = buildAgent(proxyStr);
-            if (agent) { config.httpsAgent = agent; config.proxy = false; }
+            if (agent) {
+                const response = await axios.get(url, { httpsAgent: agent, proxy: false, timeout: 10000, headers });
+                scraperDelays[workerId] = Math.max(100, delay - 20);
+                return response.data;
+            }
+        } catch (e) {
+            if (e.response && e.response.status === 429) {
+                stats.rateLimits++;
+                scraperDelays[workerId] = Math.min(10000, delay + 500);
+                console.log('[W' + workerId + '] PROXY 429 — delai: ' + scraperDelays[workerId] + 'ms');
+            } else {
+                console.log('[W' + workerId + '] PROXY ERR: ' + (e.code || e.message));
+            }
         }
-        const response = await axios.get(url, config);
-        scraperDelays[workerId] = Math.max(100, delay - 20);
+    }
+
+    // Essai 2 — direct Roblox API (fallback)
+    try {
+        const response = await axios.get(url, { timeout: 8000, headers });
+        scraperDelays[workerId] = Math.max(100, delay - 10);
         return response.data;
     } catch (e) {
         if (e.response && e.response.status === 429) {
             stats.rateLimits++;
-            scraperDelays[workerId] = Math.min(10000, delay + 500);
-            console.log('[W' + workerId + '] 429 — delai monte a ' + scraperDelays[workerId] + 'ms (total: ' + stats.rateLimits + ')');
+            scraperDelays[workerId] = Math.min(10000, delay + 200);
+            console.log('[W' + workerId + '] DIRECT 429 — delai: ' + scraperDelays[workerId] + 'ms');
+        } else {
+            console.log('[W' + workerId + '] DIRECT ERR: ' + (e.code || e.message));
         }
         return null;
     }
