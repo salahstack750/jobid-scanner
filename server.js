@@ -14,8 +14,8 @@ const PLACE_ID = 109983668079237;
 
 const MIN_PLAYERS = 5;
 const MAX_PLAYERS = 7;
-const SCAN_INTERVAL = 15000;        // 15s — proven safe
-const MAX_PAGES = 30;               // 30 pages — proven safe
+const SCAN_INTERVAL = 5000;
+const MAX_PAGES = 3;
 const JOBID_LOCK_TTL = 90 * 1000;
 const BOT_HISTORY_TTL = 6 * 60 * 60 * 1000;
 const BRAINROT_TTL = 30 * 1000;
