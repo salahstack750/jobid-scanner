@@ -1,5 +1,5 @@
 // Godzilla Notifier Backend - OPTI MAX v6.2
-// Direct Roblox API — no proxy — Railway ready
+// Cloudflare Worker proxy + Direct Roblox API fallback
 // By SALAH
 
 const express = require('express');
@@ -10,6 +10,7 @@ app.use(express.json({ limit: '10mb' }));
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || 'SALAH2026';
 const PLACE_ID = 109983668079237;
+const CF_PROXY = 'https://roblox-proxy.salahelarabi03.workers.dev';
 
 const MIN_PLAYERS = 5;
 const MAX_PLAYERS = 7;
@@ -70,10 +71,15 @@ setInterval(() => {
     for (let i = recentBrainrots.length - 1; i >= 0; i--) { if (recentBrainrots[i].expiresAt < now) recentBrainrots.splice(i, 1); }
 }, 5000);
 
+// ============================================================
+// FETCH — Cloudflare Worker proxy
+// ============================================================
+
 async function fetchServers(cursor) {
-    const url = 'https://games.roblox.com/v1/games/' + PLACE_ID
+    const url = CF_PROXY + '/v1/games/' + PLACE_ID
         + '/servers/Public?limit=100&excludeFullGames=true'
         + (cursor ? '&cursor=' + cursor : '');
+
     try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 8000);
@@ -91,6 +97,10 @@ async function fetchServers(cursor) {
         return null;
     }
 }
+
+// ============================================================
+// SCAN — fresh pool toutes les 5s
+// ============================================================
 
 async function scanPool() {
     const newPool = [];
@@ -123,7 +133,7 @@ async function scanPool() {
     }
 
     if (pagesScanned === 0) {
-        console.log('[SCAN] Roblox unreachable, pool conserve (' + pool.length + ' serveurs)');
+        console.log('[SCAN] CF Worker unreachable, pool conserve (' + pool.length + ' serveurs)');
         return;
     }
 
@@ -150,7 +160,11 @@ async function scanLoop() {
     }
 }
 
-app.get('/', (req, res) => res.json({ name: 'Godzilla Notifier', version: '6.2', pool: pool.length, placeId: PLACE_ID }));
+// ============================================================
+// ENDPOINTS
+// ============================================================
+
+app.get('/', (req, res) => res.json({ name: 'Godzilla Notifier', version: '6.2', pool: pool.length, proxy: CF_PROXY }));
 
 app.get('/health', (req, res) => res.json({ status: 'ok', uptime: Math.floor((Date.now() - stats.startedAt) / 1000), pool: pool.length }));
 
@@ -270,12 +284,13 @@ app.get('/live-monitor', (req, res) => {
 });
 
 app.get('/dashboard', (req, res) => {
-    res.send('<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Godzilla Notifier</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Courier New,monospace;background:#000;color:#00ff00;min-height:100vh;padding:20px}.bg{position:fixed;top:0;left:0;width:100%;height:100%;background-image:linear-gradient(rgba(0,255,0,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,0,.03) 1px,transparent 1px);background-size:50px 50px;z-index:-1}.container{max-width:1200px;margin:0 auto}.header{text-align:center;margin-bottom:40px;padding:30px;border:3px solid #00ff00}.header h1{font-size:48px;text-shadow:0 0 20px #00ff00;letter-spacing:8px;font-weight:900}.subtitle{font-size:13px;opacity:.8;text-transform:uppercase;letter-spacing:4px;margin-top:8px}.empty{text-align:center;padding:100px 20px;font-size:20px;border:3px dashed #00ff00;opacity:.3;text-transform:uppercase;letter-spacing:3px}.list{display:grid;gap:20px}.card{background:#000;border:3px solid #00ff00;padding:25px;position:relative;overflow:hidden;box-shadow:0 0 20px rgba(0,255,0,.3)}.top-card{border-color:#ffd700!important;box-shadow:0 0 30px rgba(255,215,0,.5)!important}.row{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}.name{font-size:24px;font-weight:900;color:#fff}.val{font-size:40px;font-weight:900;color:#00ff00;text-shadow:0 0 15px #00ff00}.badge{display:inline-block;padding:5px 10px;background:#00ff00;color:#000;font-size:11px;font-weight:900;margin-right:5px;margin-bottom:8px}.gold{background:#ffd700}.meta{font-size:12px;opacity:.6;margin-bottom:12px}.foot{display:flex;gap:10px;align-items:center}.btn{background:#00ff00;color:#000;border:none;padding:10px 25px;font-size:15px;font-weight:900;cursor:pointer;font-family:inherit}.timer{border:2px solid #00ff00;padding:7px 14px;font-size:17px;font-weight:900;min-width:65px;text-align:center}.fr{color:#00ff00}.md{color:#fa0}.xp{color:#f55}.prog{position:absolute;bottom:0;left:0;height:5px;background:#00ff00}.footer{text-align:center;margin-top:40px;padding:20px;opacity:.4;font-size:12px;border-top:1px solid #00ff00;text-transform:uppercase}</style></head><body><div class="bg"></div><div class="container"><div class="header"><h1>GODZILLA NOTIFIER</h1><div class="subtitle">OPTI MAX v6.2 — Rebirth 1+ Direct API</div></div><div id="app"><div class="empty">EN ATTENTE DE BRAINROTS...</div></div><div class="footer">Dev by SALAH | /live-monitor | /stats</div></div><script>function fmt(n){if(!n)return"$0/s";const a=Math.abs(n);if(a>=1e12)return"$"+(n/1e12).toFixed(1).replace(".0","")+"T/s";if(a>=1e9)return"$"+(n/1e9).toFixed(1).replace(".0","")+"B/s";if(a>=1e6)return"$"+(n/1e6).toFixed(1).replace(".0","")+"M/s";return"$"+(n/1e3).toFixed(1).replace(".0","")+"K/s";}function copy(t){navigator.clipboard.writeText(t).then(()=>{const d=document.createElement("div");d.style="position:fixed;top:20px;right:20px;background:#00ff00;color:#000;padding:15px 25px;font-weight:900;z-index:9999;";d.textContent="COPIE!";document.body.appendChild(d);setTimeout(()=>d.remove(),2000);})}function render(b){const c=document.getElementById("app");if(!b||!b.length){c.innerHTML=\'<div class="empty">EN ATTENTE DE BRAINROTS...</div>\';return;}b.sort((x,y)=>y.numeric-x.numeric);const l=document.createElement("div");l.className="list";b.forEach((x,i)=>{const r=x.remainingSeconds||0;const tc=r<10?"xp":r<20?"md":"fr";const d=document.createElement("div");d.className="card"+(i===0?" top-card":"");d.dataset.e=Date.now()+(r*1000);const src=x.source==="carpet"?"CARPET":x.source==="plot"?"PLOT":"UNKNOWN";const mut=x.mutation&&x.mutation!=="None"?"["+x.mutation+"] ":"";d.innerHTML=\'<div class="row"><div><div>\'+(i===0?\'<span class="badge gold">TOP</span>\':"")+ \'<span class="badge">\'+src+\'</span><span class="badge">\'+x.players+\'/8</span></div><div class="name">\'+mut+x.name+\'</div></div><div class="val">\'+fmt(x.numeric)+\'</div></div><div class="meta">BOT: \'+x.botName+\' &nbsp;|&nbsp; JOB: \'+x.jobId.substring(0,16)+\'...</div><div class="foot"><button class="btn" onclick="copy(\'+"\'"+x.jobId+"\'"+\')">JOIN</button><div class="timer \'+tc+\'">\'+r+\'s</div></div><div class="prog" style="width:\'+(r/30*100)+\'%"></div>\';l.appendChild(d);});c.innerHTML="";c.appendChild(l);}fetch("/api/brainrots").then(r=>r.json()).then(render);setInterval(()=>fetch("/api/brainrots").then(r=>r.json()).then(render),1000);setInterval(()=>{document.querySelectorAll(".card").forEach(c=>{const e=parseInt(c.dataset.e);if(!e)return;const r=Math.max(0,Math.ceil((e-Date.now())/1000));const te=c.querySelector(".timer");const pe=c.querySelector(".prog");if(te){te.textContent=r+"s";te.className="timer "+(r<10?"xp":r<20?"md":"fr");}if(pe)pe.style.width=(r/30*100)+"%";if(r<=0)c.remove();});},1000);</script></body></html>');
+    res.send('<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Godzilla Notifier</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Courier New,monospace;background:#000;color:#00ff00;min-height:100vh;padding:20px}.bg{position:fixed;top:0;left:0;width:100%;height:100%;background-image:linear-gradient(rgba(0,255,0,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,0,.03) 1px,transparent 1px);background-size:50px 50px;z-index:-1}.container{max-width:1200px;margin:0 auto}.header{text-align:center;margin-bottom:40px;padding:30px;border:3px solid #00ff00}.header h1{font-size:48px;text-shadow:0 0 20px #00ff00;letter-spacing:8px;font-weight:900}.subtitle{font-size:13px;opacity:.8;text-transform:uppercase;letter-spacing:4px;margin-top:8px}.empty{text-align:center;padding:100px 20px;font-size:20px;border:3px dashed #00ff00;opacity:.3;text-transform:uppercase;letter-spacing:3px}.list{display:grid;gap:20px}.card{background:#000;border:3px solid #00ff00;padding:25px;position:relative;overflow:hidden;box-shadow:0 0 20px rgba(0,255,0,.3)}.top-card{border-color:#ffd700!important;box-shadow:0 0 30px rgba(255,215,0,.5)!important}.row{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}.name{font-size:24px;font-weight:900;color:#fff}.val{font-size:40px;font-weight:900;color:#00ff00;text-shadow:0 0 15px #00ff00}.badge{display:inline-block;padding:5px 10px;background:#00ff00;color:#000;font-size:11px;font-weight:900;margin-right:5px;margin-bottom:8px}.gold{background:#ffd700}.meta{font-size:12px;opacity:.6;margin-bottom:12px}.foot{display:flex;gap:10px;align-items:center}.btn{background:#00ff00;color:#000;border:none;padding:10px 25px;font-size:15px;font-weight:900;cursor:pointer;font-family:inherit}.timer{border:2px solid #00ff00;padding:7px 14px;font-size:17px;font-weight:900;min-width:65px;text-align:center}.fr{color:#00ff00}.md{color:#fa0}.xp{color:#f55}.prog{position:absolute;bottom:0;left:0;height:5px;background:#00ff00}.footer{text-align:center;margin-top:40px;padding:20px;opacity:.4;font-size:12px;border-top:1px solid #00ff00;text-transform:uppercase}</style></head><body><div class="bg"></div><div class="container"><div class="header"><h1>GODZILLA NOTIFIER</h1><div class="subtitle">OPTI MAX v6.2 — Rebirth 1+ CF Proxy</div></div><div id="app"><div class="empty">EN ATTENTE DE BRAINROTS...</div></div><div class="footer">Dev by SALAH | /live-monitor | /stats</div></div><script>function fmt(n){if(!n)return"$0/s";const a=Math.abs(n);if(a>=1e12)return"$"+(n/1e12).toFixed(1).replace(".0","")+"T/s";if(a>=1e9)return"$"+(n/1e9).toFixed(1).replace(".0","")+"B/s";if(a>=1e6)return"$"+(n/1e6).toFixed(1).replace(".0","")+"M/s";return"$"+(n/1e3).toFixed(1).replace(".0","")+"K/s";}function copy(t){navigator.clipboard.writeText(t).then(()=>{const d=document.createElement("div");d.style="position:fixed;top:20px;right:20px;background:#00ff00;color:#000;padding:15px 25px;font-weight:900;z-index:9999;";d.textContent="COPIE!";document.body.appendChild(d);setTimeout(()=>d.remove(),2000);})}function render(b){const c=document.getElementById("app");if(!b||!b.length){c.innerHTML=\'<div class="empty">EN ATTENTE DE BRAINROTS...</div>\';return;}b.sort((x,y)=>y.numeric-x.numeric);const l=document.createElement("div");l.className="list";b.forEach((x,i)=>{const r=x.remainingSeconds||0;const tc=r<10?"xp":r<20?"md":"fr";const d=document.createElement("div");d.className="card"+(i===0?" top-card":"");d.dataset.e=Date.now()+(r*1000);const src=x.source==="carpet"?"CARPET":x.source==="plot"?"PLOT":"UNKNOWN";const mut=x.mutation&&x.mutation!=="None"?"["+x.mutation+"] ":"";d.innerHTML=\'<div class="row"><div><div>\'+(i===0?\'<span class="badge gold">TOP</span>\':"")+ \'<span class="badge">\'+src+\'</span><span class="badge">\'+x.players+\'/8</span></div><div class="name">\'+mut+x.name+\'</div></div><div class="val">\'+fmt(x.numeric)+\'</div></div><div class="meta">BOT: \'+x.botName+\' &nbsp;|&nbsp; JOB: \'+x.jobId.substring(0,16)+\'...</div><div class="foot"><button class="btn" onclick="copy(\'+"\'"+x.jobId+"\'"+\')">JOIN</button><div class="timer \'+tc+\'">\'+r+\'s</div></div><div class="prog" style="width:\'+(r/30*100)+\'%"></div>\';l.appendChild(d);});c.innerHTML="";c.appendChild(l);}fetch("/api/brainrots").then(r=>r.json()).then(render);setInterval(()=>fetch("/api/brainrots").then(r=>r.json()).then(render),1000);setInterval(()=>{document.querySelectorAll(".card").forEach(c=>{const e=parseInt(c.dataset.e);if(!e)return;const r=Math.max(0,Math.ceil((e-Date.now())/1000));const te=c.querySelector(".timer");const pe=c.querySelector(".prog");if(te){te.textContent=r+"s";te.className="timer "+(r<10?"xp":r<20?"md":"fr");}if(pe)pe.style.width=(r/30*100)+"%";if(r<=0)c.remove();});},1000);</script></body></html>');
 });
 
 app.listen(PORT, () => {
     console.log('================================================');
-    console.log('GODZILLA NOTIFIER v6.2 - DIRECT ROBLOX API');
+    console.log('GODZILLA NOTIFIER v6.2 - CF WORKER PROXY');
+    console.log('Proxy: ' + CF_PROXY);
     console.log('PlaceId: ' + PLACE_ID);
     console.log('Refresh: ' + SCAN_INTERVAL + 'ms | Pages max: ' + MAX_PAGES);
     console.log('Players: ' + MIN_PLAYERS + '-' + MAX_PLAYERS);
