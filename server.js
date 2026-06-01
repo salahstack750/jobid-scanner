@@ -1,8 +1,7 @@
-// Godzilla Notifier Backend - v8.1 + Discord Webhooks + Dashboard v9
+// Godzilla Notifier Backend - v8.1 + Discord Webhooks
 // Base = v5.0 (cascade fallback proxies, qui marchait sans 429)
 // + Scoring FPS/Ping + dashboard ameliore + DISCORD ALERTS
 // v8.1 : liste de bots COMPLETE (plus de limite a 15)
-// v9 : Dashboard v9.0 Enhanced — Bot Line Size + Timer System
 // By SALAH
 
 const express = require('express');
@@ -335,7 +334,7 @@ async function scanLoop() {
 // ============================================================
 
 app.get('/', (req, res) => res.json({
-    name: 'Godzilla Notifier', version: '8.1 + Discord + Dashboard v9',
+    name: 'Godzilla Notifier', version: '8.1 + Discord',
     pool: pool.length,
     config: { scanInterval: SCAN_INTERVAL + 'ms', maxPages: MAX_PAGES, proxies: PROXIES.length }
 }));
@@ -461,16 +460,12 @@ app.get('/api/brainrots', (req, res) => {
 });
 
 app.get('/live-monitor', (req, res) => {
-    res.send('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Live Monitor</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Courier New,monospace;background:#0a0a0a;color:#00ff00;padding:20px}h1{text-align:center;margin-bottom:20px;text-shadow:0 0 10px #00ff00}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:15px;margin-bottom:20px}.box{background:#111;border:1px solid #00ff00;padding:15px}.box h3{color:#ffff00;margin-bottom:10px;font-size:13px}.val{font-size:32px;font-weight:bold}.sub{font-size:11px;opacity:.7;margin-top:5px}table{width:100%;border-collapse:collapse;margin-top:10px;font-size:11px}th,td{padding:4px 8px;text-align:left;border-bottom:1px solid #002200}th{background:#001100;color:#ffff00}.good{color:#00ff00}.bad{color:#f00}.warn{color:#fa0}.refresh{text-align:center;opacity:.5;font-size:10px;margin-top:20px}</style></head><body><h1>GODZILLA v8.1 + DISCORD LIVE</h1><div id="c">Loading...</div><div class="refresh">Auto-refresh 2s</div><script>async function r(){const[s,b]=await Promise.all([fetch("/stats").then(x=>x.json()),fetch("/bots").then(x=>x.json())]);const u=Math.floor(s.uptime/60)+"min";const ab=b.filter(x=>x.secondsSinceLastSeen<30).length;let h=\'<div class="grid">\';h+=\'<div class="box"><h3>POOL</h3><div class="val good">\'+s.pool+\'</div><div class="sub">\'+s.totalScans+\' scans</div></div>\';h+=\'<div class="box"><h3>JOBS/MIN</h3><div class="val">\'+s.jobsPerMinute+\'</div><div class="sub">\'+s.jobsServed+\' servis</div></div>\';h+=\'<div class="box"><h3>HIT RATE</h3><div class="val \'+(parseInt(s.reportsHitRate)>30?"good":"warn")+\'">\'+s.reportsHitRate+\'</div><div class="sub">\'+s.reportsReceived+\' reports</div></div>\';h+=\'<div class="box"><h3>BOTS</h3><div class="val">\'+ab+\'/\'+b.length+\'</div><div class="sub">uptime: \'+u+\'</div></div>\';h+=\'<div class="box"><h3>QUALITE POOL</h3><div class="val">\'+s.quality.avgScore+\'</div><div class="sub">FPS:\'+s.quality.avgFps+\' Ping:\'+s.quality.avgPing+\'ms</div></div>\';h+=\'<div class="box"><h3>BRAINROTS LIVE</h3><div class="val good">\'+s.recentBrainrots+\'</div><div class="sub">TTL 30s</div></div>\';h+=\'</div>\';h+=\'<div class="box"><h3>BOTS DETAIL (\'+b.length+\')</h3><table><tr><th>Nom</th><th>Jobs</th><th>Vu il y a</th><th>Status</th></tr>\';b.forEach(x=>{const st=x.secondsSinceLastSeen<15?\'<span class="good">ACTIVE</span>\':x.secondsSinceLastSeen<60?\'<span class="warn">SLOW</span>\':\'<span class="bad">IDLE</span>\';h+=\'<tr><td>\'+x.name+\'</td><td>\'+x.jobsReceived+\'</td><td>\'+x.secondsSinceLastSeen+\'s</td><td>\'+st+\'</td></tr>\';});h+=\'</table></div>\';document.getElementById("c").innerHTML=h;}r();setInterval(r,2000);</script></body></html>');
-});
-
-app.get('/dashboard', (req, res) => {
     res.send(`<!DOCTYPE html>
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Godzilla Notifier v9 - Enhanced Dashboard</title>
+    <title>Godzilla Live Monitor v9</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
@@ -480,7 +475,6 @@ app.get('/dashboard', (req, res) => {
             color: #00ff00;
             min-height: 100vh;
             padding: 20px;
-            overflow-x: hidden;
         }
         
         .bg {
@@ -520,296 +514,104 @@ app.get('/dashboard', (req, res) => {
             letter-spacing: 3px;
         }
         
-        .toolbar {
-            display: flex;
-            gap: 15px;
-            justify-content: center;
-            align-items: center;
-            margin-bottom: 25px;
-            flex-wrap: wrap;
-        }
-        
-        .btn-group {
-            display: flex;
-            gap: 10px;
-            align-items: center;
-        }
-        
-        .btn {
-            background: #00ff00;
-            color: #000;
-            border: 2px solid #00ff00;
-            padding: 12px 25px;
-            font-size: 13px;
-            font-weight: 900;
-            cursor: pointer;
-            font-family: inherit;
-            text-transform: uppercase;
-            letter-spacing: 2px;
-            transition: all 0.2s;
-            min-width: 120px;
-        }
-        
-        .btn:hover {
-            background: #000;
-            color: #00ff00;
-            box-shadow: 0 0 15px rgba(0,255,0,0.6);
-            transform: scale(1.05);
-        }
-        
-        .btn-clear {
-            background: #ff4444;
-            border-color: #ff4444;
-            min-width: 150px;
-        }
-        
-        .btn-clear:hover {
-            background: #000;
-            color: #ff4444;
-            box-shadow: 0 0 15px rgba(255,68,68,0.6);
-        }
-        
-        .slider-group {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            background: rgba(0,255,0,0.1);
-            padding: 8px 15px;
-            border: 2px solid #00ff00;
-            border-radius: 4px;
-        }
-        
-        .slider-group label {
-            font-size: 11px;
-            white-space: nowrap;
-            font-weight: 900;
-        }
-        
-        input[type="range"] {
-            width: 150px;
-            accent-color: #00ff00;
-        }
-        
-        .size-display {
-            font-size: 13px;
-            font-weight: 900;
-            color: #ffff00;
-            min-width: 50px;
-        }
-        
-        .stats-grid {
+        .grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
             gap: 15px;
-            margin-bottom: 25px;
+            margin-bottom: 30px;
         }
         
         .stat-box {
-            background: rgba(0,255,0,0.05);
+            background: rgba(0, 255, 0, 0.05);
             border: 2px solid #00ff00;
-            padding: 15px;
+            padding: 20px;
             text-align: center;
+            box-shadow: 0 0 15px rgba(0,255,0,0.2);
+            transition: all 0.3s;
+        }
+        
+        .stat-box:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 0 25px rgba(0,255,0,0.4);
         }
         
         .stat-label {
             font-size: 11px;
             opacity: .7;
             text-transform: uppercase;
-            margin-bottom: 5px;
+            margin-bottom: 10px;
+            letter-spacing: 2px;
         }
         
         .stat-value {
-            font-size: 36px;
+            font-size: 42px;
             font-weight: 900;
             color: #ffff00;
             text-shadow: 0 0 10px #ffff00;
         }
         
-        .empty {
-            text-align: center;
-            padding: 80px 20px;
-            font-size: 18px;
-            border: 3px dashed #00ff00;
-            opacity: .4;
-            text-transform: uppercase;
-            letter-spacing: 2px;
-            margin: 40px 0;
+        .stat-sub {
+            font-size: 11px;
+            opacity: .6;
+            margin-top: 8px;
         }
         
-        .list {
-            display: grid;
-            gap: 15px;
-            margin-bottom: 30px;
-        }
-        
-        .card {
+        .bots-section {
             background: #000;
             border: 2px solid #00ff00;
-            padding: 20px;
-            position: relative;
-            overflow: hidden;
+            padding: 25px;
             box-shadow: 0 0 15px rgba(0,255,0,0.2);
-            transition: all 0.3s;
-            min-height: 140px;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
         }
         
-        .card.top-card {
-            border: 3px solid #ffd700;
-            background: rgba(255, 215, 0, 0.08);
-            box-shadow: 0 0 25px rgba(255,215,0,0.4), inset 0 0 20px rgba(255,215,0,0.1);
-        }
-        
-        .card:hover {
-            transform: translateY(-3px);
-            box-shadow: 0 0 25px rgba(0,255,0,0.4);
-        }
-        
-        .card.top-card:hover {
-            box-shadow: 0 0 30px rgba(255,215,0,0.6), inset 0 0 20px rgba(255,215,0,0.1);
-        }
-        
-        .bot-name {
-            font-size: 32px;
+        .bots-title {
+            font-size: 16px;
             font-weight: 900;
-            color: #fff;
-            text-shadow: 0 0 10px rgba(0,255,0,0.3);
-            margin-bottom: 12px;
-            letter-spacing: 1px;
+            color: #ffff00;
+            margin-bottom: 20px;
             text-transform: uppercase;
+            letter-spacing: 2px;
         }
         
-        .card.top-card .bot-name {
-            color: #ffd700;
-            text-shadow: 0 0 15px rgba(255,215,0,0.6);
-        }
-        
-        .bot-value {
-            font-size: 48px;
-            font-weight: 900;
-            color: #00ff00;
-            text-shadow: 0 0 15px #00ff00;
-            margin-bottom: 10px;
-        }
-        
-        .card.top-card .bot-value {
-            color: #ffd700;
-            text-shadow: 0 0 20px #ffd700;
-        }
-        
-        .bot-meta {
-            display: flex;
-            gap: 15px;
+        table {
+            width: 100%;
+            border-collapse: collapse;
             font-size: 13px;
-            opacity: .8;
-            margin-bottom: 12px;
-            flex-wrap: wrap;
         }
         
-        .meta-item {
-            background: rgba(0,255,0,0.1);
-            padding: 5px 12px;
-            border-radius: 3px;
-            white-space: nowrap;
-        }
-        
-        .card.top-card .meta-item {
-            background: rgba(255,215,0,0.15);
-        }
-        
-        .badges {
-            display: flex;
-            gap: 8px;
-            margin-bottom: 12px;
-            flex-wrap: wrap;
-        }
-        
-        .badge {
-            display: inline-block;
-            padding: 6px 12px;
-            background: #00ff00;
-            color: #000;
-            font-size: 12px;
+        th {
+            background: rgba(0, 255, 0, 0.1);
+            color: #ffff00;
+            padding: 15px;
+            text-align: left;
+            border: 1px solid #00ff00;
             font-weight: 900;
             text-transform: uppercase;
             letter-spacing: 1px;
         }
         
-        .badge.gold {
-            background: #ffd700;
+        td {
+            padding: 15px;
+            border-bottom: 1px solid #002200;
+            color: #00ff00;
         }
         
-        .badge.mut {
-            background: #00ddff;
+        tr:hover {
+            background: rgba(0, 255, 0, 0.08);
         }
         
-        .card-footer {
-            display: flex;
-            gap: 10px;
-            align-items: center;
-            margin-top: 12px;
-        }
-        
-        .card-btn {
-            background: #00ff00;
-            color: #000;
-            border: none;
-            padding: 10px 20px;
-            font-size: 12px;
+        .active {
+            color: #00ff00;
             font-weight: 900;
-            cursor: pointer;
-            font-family: inherit;
-            text-transform: uppercase;
-            transition: all 0.2s;
-            flex: 1;
         }
         
-        .card-btn:hover {
-            background: #ffff00;
-            box-shadow: 0 0 10px rgba(255,255,0,0.5);
-        }
-        
-        .timer {
-            border: 2px solid #00ff00;
-            padding: 8px 15px;
-            font-size: 20px;
-            font-weight: 900;
-            min-width: 80px;
-            text-align: center;
-            background: rgba(0,255,0,0.1);
-        }
-        
-        .timer.warn {
-            border-color: #fa0;
+        .slow {
             color: #fa0;
-            background: rgba(250,165,0,0.1);
+            font-weight: 900;
         }
         
-        .timer.critical {
-            border-color: #f55;
+        .idle {
             color: #f55;
-            background: rgba(255,85,85,0.1);
-        }
-        
-        .card.top-card .timer {
-            border-color: #ffd700;
-            color: #ffd700;
-            background: rgba(255,215,0,0.1);
-        }
-        
-        .prog {
-            position: absolute;
-            bottom: 0;
-            left: 0;
-            height: 4px;
-            background: #00ff00;
-            transition: width 0.1s linear;
-        }
-        
-        .card.top-card .prog {
-            background: #ffd700;
+            font-weight: 900;
         }
         
         .footer {
@@ -824,11 +626,9 @@ app.get('/dashboard', (req, res) => {
         
         @media (max-width: 768px) {
             .header h1 { font-size: 36px; }
-            .bot-name { font-size: 24px; }
-            .bot-value { font-size: 36px; }
-            .toolbar { flex-direction: column; }
-            .btn, .btn-clear { width: 100%; }
-            .slider-group { width: 100%; }
+            .stat-value { font-size: 32px; }
+            table { font-size: 11px; }
+            th, td { padding: 10px; }
         }
     </style>
 </head>
@@ -836,250 +636,138 @@ app.get('/dashboard', (req, res) => {
     <div class="bg"></div>
     <div class="container">
         <div class="header">
-            <h1>🔥 GODZILLA NOTIFIER 🔥</h1>
-            <div class="subtitle">v9.0 Enhanced — Discord Alerts + Live Dashboard</div>
+            <h1>🔥 GODZILLA LIVE MONITOR 🔥</h1>
+            <div class="subtitle">v9.0 Enhanced — Real-time Bot Status</div>
         </div>
         
-        <div class="toolbar">
-            <div class="btn-group">
-                <button class="btn" onclick="refreshData()">🔄 REFRESH</button>
-                <button class="btn btn-clear" onclick="clearAll()">❌ CLEAR ALL BOTS</button>
+        <div class="grid" id="stats-grid">
+            <div class="stat-box">
+                <div class="stat-label">Server Pool</div>
+                <div class="stat-value" id="stat-pool">0</div>
+                <div class="stat-sub" id="stat-scans">0 scans</div>
             </div>
-            <div class="slider-group">
-                <label for="sizeSlider">📏 Bot Line Size:</label>
-                <input type="range" id="sizeSlider" min="1" max="2.5" step="0.1" value="1" oninput="updateSize()">
-                <div class="size-display" id="sizeDisplay">1.0x</div>
+            <div class="stat-box">
+                <div class="stat-label">Jobs/Minute</div>
+                <div class="stat-value" id="stat-jobsmin">0</div>
+                <div class="stat-sub" id="stat-jobstotal">0 served</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Hit Rate</div>
+                <div class="stat-value" id="stat-hitrate">0%</div>
+                <div class="stat-sub" id="stat-reports">0 reports</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Active Bots</div>
+                <div class="stat-value" id="stat-active">0/0</div>
+                <div class="stat-sub" id="stat-uptime">uptime</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Pool Quality</div>
+                <div class="stat-value" id="stat-score">0</div>
+                <div class="stat-sub" id="stat-quality">FPS/Ping</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Live Brainrots</div>
+                <div class="stat-value" id="stat-brainrots">0</div>
+                <div class="stat-sub">TTL 30s</div>
             </div>
         </div>
         
-        <div class="stats-grid">
-            <div class="stat-box">
-                <div class="stat-label">Brainrots Live</div>
-                <div class="stat-value" id="stat-count">0</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-label">Highest Value</div>
-                <div class="stat-value" id="stat-highest">$0</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-label">Average TTL</div>
-                <div class="stat-value" id="stat-ttl">0s</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-label">Last Update</div>
-                <div class="stat-value" id="stat-update">--:--</div>
-            </div>
-        </div>
-        
-        <div id="app">
-            <div class="empty">⏳ AWAITING BRAINROTS...</div>
+        <div class="bots-section">
+            <div class="bots-title">📊 Bots Detail</div>
+            <table id="bots-table">
+                <thead>
+                    <tr>
+                        <th>Bot Name</th>
+                        <th>Jobs Received</th>
+                        <th>Last Seen</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="bots-tbody">
+                    <tr>
+                        <td colspan="4" style="text-align: center; opacity: 0.5;">No bots yet...</td>
+                    </tr>
+                </tbody>
+            </table>
         </div>
         
         <div class="footer">
-            Dev by SALAH | Godzilla v8.1+ | Auto-refresh 1s | /live-monitor | /stats
+            Dev by SALAH | Godzilla v9.0+ | Auto-refresh 2s | /dashboard | /stats
         </div>
     </div>
     
     <script>
-        let allBrainrots = [];
-        let sizeMultiplier = 1;
-        
-        function fmt(n) {
-            if (!n) return "$0/s";
-            const a = Math.abs(n);
-            if (a >= 1e12) return "$" + (n/1e12).toFixed(1).replace(".0","") + "T/s";
-            if (a >= 1e9) return "$" + (n/1e9).toFixed(1).replace(".0","") + "B/s";
-            if (a >= 1e6) return "$" + (n/1e6).toFixed(1).replace(".0","") + "M/s";
-            return "$" + (n/1e3).toFixed(1).replace(".0","") + "K/s";
-        }
-        
-        function copy(t) {
-            navigator.clipboard.writeText(t).then(() => {
-                const d = document.createElement("div");
-                d.style = "position:fixed;top:20px;right:20px;background:#00ff00;color:#000;padding:15px 25px;font-weight:900;z-index:9999;border:2px solid #000;font-size:14px;";
-                d.textContent = "✅ COPIED!";
-                document.body.appendChild(d);
-                setTimeout(() => d.remove(), 2000);
-            });
-        }
-        
-        function removeBrainrot(index) {
-            allBrainrots.splice(index, 1);
-            render(allBrainrots);
-        }
-        
-        function clearAll() {
-            if (confirm('⚠️ Clear ALL brainrots? (Cannot undo)')) {
-                allBrainrots = [];
-                render([]);
-            }
-        }
-        
-        function updateSize() {
-            sizeMultiplier = parseFloat(document.getElementById('sizeSlider').value);
-            document.getElementById('sizeDisplay').textContent = sizeMultiplier.toFixed(1) + 'x';
-            document.querySelectorAll('.card').forEach(card => {
-                card.style.minHeight = (140 * sizeMultiplier) + 'px';
-                card.style.padding = (20 * sizeMultiplier) + 'px';
-            });
-            document.querySelectorAll('.bot-name').forEach(el => {
-                el.style.fontSize = (32 * sizeMultiplier) + 'px';
-            });
-            document.querySelectorAll('.bot-value').forEach(el => {
-                el.style.fontSize = (48 * sizeMultiplier) + 'px';
-            });
-            document.querySelectorAll('.bot-meta').forEach(el => {
-                el.style.fontSize = (13 * sizeMultiplier) + 'px';
-            });
-            document.querySelectorAll('.timer').forEach(el => {
-                el.style.fontSize = (20 * sizeMultiplier) + 'px';
-            });
-        }
-        
-        async function refreshData() {
+        async function updateMonitor() {
             try {
-                const resp = await fetch("/api/brainrots");
-                if (resp.ok) {
-                    allBrainrots = await resp.json();
-                    render(allBrainrots);
+                const [stats, bots] = await Promise.all([
+                    fetch("/stats").then(r => r.json()),
+                    fetch("/bots").then(r => r.json())
+                ]);
+                
+                const uptime = Math.floor(stats.uptime / 60);
+                const activeBots = bots.filter(b => b.secondsSinceLastSeen < 30).length;
+                
+                // Update stats
+                document.getElementById('stat-pool').textContent = stats.pool;
+                document.getElementById('stat-scans').textContent = stats.totalScans + ' scans';
+                
+                document.getElementById('stat-jobsmin').textContent = stats.jobsPerMinute;
+                document.getElementById('stat-jobstotal').textContent = stats.jobsServed + ' served';
+                
+                document.getElementById('stat-hitrate').textContent = stats.reportsHitRate;
+                document.getElementById('stat-reports').textContent = stats.reportsReceived + ' reports';
+                
+                document.getElementById('stat-active').textContent = activeBots + '/' + bots.length;
+                document.getElementById('stat-uptime').textContent = uptime + 'min uptime';
+                
+                document.getElementById('stat-score').textContent = stats.quality.avgScore;
+                document.getElementById('stat-quality').textContent = 'FPS:' + stats.quality.avgFps + ' Ping:' + stats.quality.avgPing + 'ms';
+                
+                document.getElementById('stat-brainrots').textContent = stats.recentBrainrots;
+                
+                // Update bots table
+                const tbody = document.getElementById('bots-tbody');
+                if (bots.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; opacity: 0.5;">No bots yet...</td></tr>';
+                } else {
+                    tbody.innerHTML = bots.map(bot => {
+                        let statusClass = 'idle';
+                        let statusText = '❌ IDLE';
+                        if (bot.secondsSinceLastSeen < 15) {
+                            statusClass = 'active';
+                            statusText = '✅ ACTIVE';
+                        } else if (bot.secondsSinceLastSeen < 60) {
+                            statusClass = 'slow';
+                            statusText = '⚠️ SLOW';
+                        }
+                        return \`<tr>
+                            <td style="font-weight: 900;">\${bot.name}</td>
+                            <td>\${bot.jobsReceived}</td>
+                            <td>\${bot.secondsSinceLastSeen}s ago</td>
+                            <td><span class="\${statusClass}">\${statusText}</span></td>
+                        </tr>\`;
+                    }).join('');
                 }
             } catch (e) {
-                console.error("Fetch error:", e);
+                console.error('Update error:', e);
             }
         }
         
-        function render(b) {
-            const c = document.getElementById("app");
-            
-            if (!b || b.length === 0) {
-                c.innerHTML = '<div class="empty">⏳ AWAITING BRAINROTS...</div>';
-                updateStats(b);
-                return;
-            }
-            
-            b.sort((x, y) => y.numeric - x.numeric);
-            
-            const l = document.createElement("div");
-            l.className = "list";
-            
-            b.forEach((x, i) => {
-                const d = document.createElement("div");
-                d.className = "card" + (i === 0 ? " top-card" : "");
-                d.dataset.startTime = Date.now();
-                d.style.minHeight = (140 * sizeMultiplier) + 'px';
-                d.style.padding = (20 * sizeMultiplier) + 'px';
-                
-                const src = x.source === "carpet" ? "CARPET" : x.source === "plot" ? "PLOT" : "?";
-                const mut = x.mutation && x.mutation !== "None" ? x.mutation : null;
-                
-                const badgesHtml = \`
-                    \${i === 0 ? '<span class="badge gold">🏆 TOP</span>' : ''}
-                    <span class="badge">\${src}</span>
-                    <span class="badge">\${x.players}/8</span>
-                    \${mut ? \`<span class="badge mut">[\${mut}]</span>\` : ''}
-                \`;
-                
-                d.innerHTML = \`
-                    <div>
-                        <div class="badges">\${badgesHtml}</div>
-                        <div class="bot-name" style="font-size: \${32 * sizeMultiplier}px;">\${x.name}</div>
-                        <div class="bot-value" style="font-size: \${48 * sizeMultiplier}px;">\${fmt(x.numeric)}</div>
-                    </div>
-                    <div class="bot-meta" style="font-size: \${13 * sizeMultiplier}px;">
-                        <div class="meta-item">🤖 \${x.botName}</div>
-                        <div class="meta-item">📍 \${x.jobId.substring(0, 20)}...</div>
-                    </div>
-                    <div class="card-footer">
-                        <button class="card-btn" onclick="copy('\${x.jobId}')">📋 COPY ID</button>
-                        <button class="card-btn" onclick="copy('\${x.jobId.substring(0, 12)}')")>📌 SHORT</button>
-                        <div class="timer" style="font-size: \${20 * sizeMultiplier}px;">0s</div>
-                        <button class="card-btn" onclick="removeBrainrot(\${i})">❌</button>
-                    </div>
-                    <div class="prog" style="width: 100%;"></div>
-                \`;
-                
-                l.appendChild(d);
-            });
-            
-            c.innerHTML = "";
-            c.appendChild(l);
-            updateStats(b);
-        }
-        
-        function updateStats(b) {
-            document.getElementById('stat-count').textContent = b ? b.length : '0';
-            
-            if (b && b.length > 0) {
-                const highest = b[0].numeric;
-                document.getElementById('stat-highest').textContent = fmt(highest);
-                
-                const avgTtl = Math.round(b.reduce((a, x) => a + (x.remainingSeconds || 0), 0) / b.length);
-                document.getElementById('stat-ttl').textContent = avgTtl + 's';
-            } else {
-                document.getElementById('stat-highest').textContent = '$0';
-                document.getElementById('stat-ttl').textContent = '0s';
-            }
-            
-            const now = new Date();
-            document.getElementById('stat-update').textContent = 
-                String(now.getHours()).padStart(2, '0') + ':' +
-                String(now.getMinutes()).padStart(2, '0');
-        }
-        
-        refreshData();
-        setInterval(refreshData, 1000);
-        
-        setInterval(() => {
-            document.querySelectorAll(".card").forEach((c, idx) => {
-                const startTime = parseInt(c.dataset.startTime);
-                const elapsed = Math.floor((Date.now() - startTime) / 1000);
-                
-                const te = c.querySelector(".timer");
-                const pe = c.querySelector(".prog");
-                
-                if (te) {
-                    te.textContent = elapsed + 's';
-                    
-                    if (elapsed < 60) {
-                        te.className = "timer";
-                        te.style.borderColor = "#00ff00";
-                        te.style.color = "#00ff00";
-                        te.style.background = "rgba(0,255,0,0.1)";
-                    } else if (elapsed < 100) {
-                        te.className = "timer warn";
-                        te.style.borderColor = "#fa0";
-                        te.style.color = "#fa0";
-                        te.style.background = "rgba(250,165,0,0.1)";
-                    } else {
-                        te.className = "timer critical";
-                        te.style.borderColor = "#f55";
-                        te.style.color = "#f55";
-                        te.style.background = "rgba(255,85,85,0.1)";
-                    }
-                }
-                
-                if (pe) {
-                    const progress = Math.min(100, (elapsed / 100) * 100);
-                    pe.style.width = progress + "%";
-                    
-                    if (elapsed < 60) {
-                        pe.style.background = "#00ff00";
-                    } else if (elapsed < 100) {
-                        pe.style.background = "#fa0";
-                    } else {
-                        pe.style.background = "#f55";
-                    }
-                }
-            });
-        }, 500);
+        updateMonitor();
+        setInterval(updateMonitor, 2000);
     </script>
 </body>
 </html>`);
 });
 
+app.get('/dashboard', (req, res) => {
+    res.send('<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Godzilla Notifier</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Courier New,monospace;background:#000;color:#00ff00;min-height:100vh;padding:20px}.bg{position:fixed;top:0;left:0;width:100%;height:100%;background-image:linear-gradient(rgba(0,255,0,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,0,.03) 1px,transparent 1px);background-size:50px 50px;z-index:-1}.container{max-width:1200px;margin:0 auto}.header{text-align:center;margin-bottom:40px;padding:30px;border:3px solid #00ff00}.header h1{font-size:48px;text-shadow:0 0 20px #00ff00;letter-spacing:8px;font-weight:900}.subtitle{font-size:13px;opacity:.8;text-transform:uppercase;letter-spacing:4px;margin-top:8px}.empty{text-align:center;padding:100px 20px;font-size:20px;border:3px dashed #00ff00;opacity:.3;text-transform:uppercase;letter-spacing:3px}.list{display:grid;gap:20px}.card{background:#000;border:3px solid #00ff00;padding:25px;position:relative;overflow:hidden;box-shadow:0 0 20px rgba(0,255,0,.3)}.top-card{border-color:#ffd700!important;box-shadow:0 0 30px rgba(255,215,0,.5)!important}.row{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}.name{font-size:24px;font-weight:900;color:#fff}.val{font-size:40px;font-weight:900;color:#00ff00;text-shadow:0 0 15px #00ff00}.badge{display:inline-block;padding:5px 10px;background:#00ff00;color:#000;font-size:11px;font-weight:900;margin-right:5px;margin-bottom:8px}.gold{background:#ffd700}.meta{font-size:12px;opacity:.6;margin-bottom:12px}.foot{display:flex;gap:10px;align-items:center}.btn{background:#00ff00;color:#000;border:none;padding:10px 25px;font-size:15px;font-weight:900;cursor:pointer;font-family:inherit}.timer{border:2px solid #00ff00;padding:7px 14px;font-size:17px;font-weight:900;min-width:65px;text-align:center}.fr{color:#00ff00}.md{color:#fa0}.xp{color:#f55}.prog{position:absolute;bottom:0;left:0;height:5px;background:#00ff00}.footer{text-align:center;margin-top:40px;padding:20px;opacity:.4;font-size:12px;border-top:1px solid #00ff00;text-transform:uppercase}</style></head><body><div class="bg"></div><div class="container"><div class="header"><h1>GODZILLA NOTIFIER</h1><div class="subtitle">v8.1 + Discord Webhooks — Cascade Fallback + Scoring</div></div><div id="app"><div class="empty">EN ATTENTE DE BRAINROTS...</div></div><div class="footer">Dev by SALAH | Discord Alerts Enabled | /live-monitor | /stats</div></div><script>function fmt(n){if(!n)return"$0/s";const a=Math.abs(n);if(a>=1e12)return"$"+(n/1e12).toFixed(1).replace(".0","")+"T/s";if(a>=1e9)return"$"+(n/1e9).toFixed(1).replace(".0","")+"B/s";if(a>=1e6)return"$"+(n/1e6).toFixed(1).replace(".0","")+"M/s";return"$"+(n/1e3).toFixed(1).replace(".0","")+"K/s";}function copy(t){navigator.clipboard.writeText(t).then(()=>{const d=document.createElement("div");d.style="position:fixed;top:20px;right:20px;background:#00ff00;color:#000;padding:15px 25px;font-weight:900;z-index:9999;";d.textContent="COPIE!";document.body.appendChild(d);setTimeout(()=>d.remove(),2000);})}function render(b){const c=document.getElementById("app");if(!b||!b.length){c.innerHTML=\'<div class="empty">EN ATTENTE DE BRAINROTS...</div>\';return;}b.sort((x,y)=>y.numeric-x.numeric);const l=document.createElement("div");l.className="list";b.forEach((x,i)=>{const r=x.remainingSeconds||0;const tc=r<10?"xp":r<20?"md":"fr";const d=document.createElement("div");d.className="card"+(i===0?" top-card":"");d.dataset.e=Date.now()+(r*1000);const src=x.source==="carpet"?"CARPET":x.source==="plot"?"PLOT":"UNKNOWN";const mut=x.mutation&&x.mutation!=="None"?"["+x.mutation+"] ":"";d.innerHTML=\'<div class="row"><div><div>\'+(i===0?\'<span class="badge gold">TOP</span>\':"")+ \'<span class="badge">\'+src+\'</span><span class="badge">\'+x.players+\'/8</span></div><div class="name">\'+mut+x.name+\'</div></div><div class="val">\'+fmt(x.numeric)+\'</div></div><div class="meta">BOT: \'+x.botName+\' &nbsp;|&nbsp; JOB: \'+x.jobId.substring(0,16)+\'...</div><div class="foot"><button class="btn" onclick="copy(\'+"\'"+x.jobId+"\'"+\')">JOIN</button><div class="timer \'+tc+\'">\'+r+\'s</div></div><div class="prog" style="width:\'+(r/30*100)+\'%"></div>\';l.appendChild(d);});c.innerHTML="";c.appendChild(l);}fetch("/api/brainrots").then(r=>r.json()).then(render);setInterval(()=>fetch("/api/brainrots").then(r=>r.json()).then(render),1000);setInterval(()=>{document.querySelectorAll(".card").forEach(c=>{const e=parseInt(c.dataset.e);if(!e)return;const r=Math.max(0,Math.ceil((e-Date.now())/1000));const te=c.querySelector(".timer");const pe=c.querySelector(".prog");if(te){te.textContent=r+"s";te.className="timer "+(r<10?"xp":r<20?"md":"fr");}if(pe)pe.style.width=(r/30*100)+"%";if(r<=0)c.remove();});},1000);</script></body></html>');
+});
+
 app.listen(PORT, () => {
     console.log('================================================');
-    console.log('GODZILLA NOTIFIER v8.1 + DISCORD + DASHBOARD v9');
+    console.log('GODZILLA NOTIFIER v8.1 + DISCORD WEBHOOKS');
     console.log('PlaceId: ' + PLACE_ID);
     console.log('Scan: toutes les ' + (SCAN_INTERVAL/1000) + 's | Pages: ' + MAX_PAGES);
     console.log('Proxies cascade:');
