@@ -514,6 +514,63 @@ app.get('/live-monitor', (req, res) => {
             letter-spacing: 3px;
         }
         
+        .controls {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+            padding: 20px;
+            border: 2px solid #00ff00;
+            background: rgba(0, 255, 0, 0.03);
+        }
+        
+        .slider-group {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .slider-label {
+            font-size: 12px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: #ffff00;
+        }
+        
+        input[type="range"] {
+            width: 200px;
+            cursor: pointer;
+        }
+        
+        .slider-value {
+            font-size: 16px;
+            font-weight: 900;
+            color: #ffff00;
+            min-width: 60px;
+        }
+        
+        .clear-btn {
+            background: #f55;
+            color: #000;
+            border: 2px solid #f55;
+            padding: 12px 30px;
+            font-size: 16px;
+            font-weight: 900;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            transition: all 0.3s;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .clear-btn:hover {
+            background: #ff0000;
+            box-shadow: 0 0 30px rgba(255, 0, 0, 0.8);
+        }
+        
         .grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -572,46 +629,81 @@ app.get('/live-monitor', (req, res) => {
             letter-spacing: 2px;
         }
         
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 13px;
+        .bots-list {
+            display: grid;
+            gap: 20px;
         }
         
-        th {
-            background: rgba(0, 255, 0, 0.1);
-            color: #ffff00;
-            padding: 15px;
-            text-align: left;
-            border: 1px solid #00ff00;
+        .bot-card {
+            background: #000;
+            border: 2px solid #00ff00;
+            padding: 25px;
+            min-height: 140px;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s;
+        }
+        
+        .bot-card:hover {
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.4);
+        }
+        
+        .bot-name {
+            font-size: 32px;
             font-weight: 900;
+            color: #fff;
             text-transform: uppercase;
-            letter-spacing: 1px;
+            letter-spacing: 2px;
+            margin-bottom: 12px;
         }
         
-        td {
-            padding: 15px;
-            border-bottom: 1px solid #002200;
-            color: #00ff00;
+        .bot-stats {
+            display: flex;
+            gap: 20px;
+            font-size: 13px;
+            margin-bottom: 12px;
         }
         
-        tr:hover {
-            background: rgba(0, 255, 0, 0.08);
+        .bot-stat {
+            opacity: .7;
         }
         
-        .active {
-            color: #00ff00;
+        .bot-status {
+            font-size: 16px;
             font-weight: 900;
         }
         
-        .slow {
+        .status-active {
+            color: #00ff00;
+        }
+        
+        .status-slow {
             color: #fa0;
-            font-weight: 900;
         }
         
-        .idle {
+        .status-idle {
             color: #f55;
-            font-weight: 900;
+        }
+        
+        .timer-bar {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            height: 8px;
+            background: #00ff00;
+            transition: all 0.3s;
+        }
+        
+        .timer-green {
+            background: #00ff00;
+        }
+        
+        .timer-orange {
+            background: #fa0;
+        }
+        
+        .timer-red {
+            background: #f55;
         }
         
         .footer {
@@ -627,8 +719,9 @@ app.get('/live-monitor', (req, res) => {
         @media (max-width: 768px) {
             .header h1 { font-size: 36px; }
             .stat-value { font-size: 32px; }
-            table { font-size: 11px; }
-            th, td { padding: 10px; }
+            .bot-name { font-size: 24px; }
+            .controls { flex-direction: column; }
+            input[type="range"] { width: 150px; }
         }
     </style>
 </head>
@@ -638,6 +731,15 @@ app.get('/live-monitor', (req, res) => {
         <div class="header">
             <h1>🔥 GODZILLA LIVE MONITOR 🔥</h1>
             <div class="subtitle">v9.0 Enhanced — Real-time Bot Status</div>
+        </div>
+        
+        <div class="controls">
+            <div class="slider-group">
+                <span class="slider-label">📏 Bot Line Size:</span>
+                <input type="range" id="sizeSlider" min="1" max="2.5" step="0.1" value="1" />
+                <span class="slider-value" id="sizeValue">1.0x</span>
+            </div>
+            <button class="clear-btn" onclick="if(confirm('Clear all bots?')) clearAllBots()">❌ CLEAR ALL BOTS</button>
         </div>
         
         <div class="grid" id="stats-grid">
@@ -675,21 +777,9 @@ app.get('/live-monitor', (req, res) => {
         
         <div class="bots-section">
             <div class="bots-title">📊 Bots Detail</div>
-            <table id="bots-table">
-                <thead>
-                    <tr>
-                        <th>Bot Name</th>
-                        <th>Jobs Received</th>
-                        <th>Last Seen</th>
-                        <th>Status</th>
-                    </tr>
-                </thead>
-                <tbody id="bots-tbody">
-                    <tr>
-                        <td colspan="4" style="text-align: center; opacity: 0.5;">No bots yet...</td>
-                    </tr>
-                </tbody>
-            </table>
+            <div class="bots-list" id="bots-list">
+                <div style="text-align: center; opacity: 0.5; padding: 40px;">No bots yet...</div>
+            </div>
         </div>
         
         <div class="footer">
@@ -698,6 +788,24 @@ app.get('/live-monitor', (req, res) => {
     </div>
     
     <script>
+        let botTimers = {};
+        let sizeMultiplier = 1;
+        
+        document.getElementById('sizeSlider').addEventListener('change', (e) => {
+            sizeMultiplier = parseFloat(e.target.value);
+            document.getElementById('sizeValue').textContent = sizeMultiplier.toFixed(1) + 'x';
+            updateBotDisplay();
+        });
+        
+        async function clearAllBots() {
+            try {
+                await fetch('/api/brainrots', { method: 'DELETE' });
+                updateMonitor();
+            } catch (e) {
+                console.error('Clear failed:', e);
+            }
+        }
+        
         async function updateMonitor() {
             try {
                 const [stats, bots] = await Promise.all([
@@ -708,49 +816,64 @@ app.get('/live-monitor', (req, res) => {
                 const uptime = Math.floor(stats.uptime / 60);
                 const activeBots = bots.filter(b => b.secondsSinceLastSeen < 30).length;
                 
-                // Update stats
                 document.getElementById('stat-pool').textContent = stats.pool;
                 document.getElementById('stat-scans').textContent = stats.totalScans + ' scans';
-                
                 document.getElementById('stat-jobsmin').textContent = stats.jobsPerMinute;
                 document.getElementById('stat-jobstotal').textContent = stats.jobsServed + ' served';
-                
                 document.getElementById('stat-hitrate').textContent = stats.reportsHitRate;
                 document.getElementById('stat-reports').textContent = stats.reportsReceived + ' reports';
-                
                 document.getElementById('stat-active').textContent = activeBots + '/' + bots.length;
                 document.getElementById('stat-uptime').textContent = uptime + 'min uptime';
-                
                 document.getElementById('stat-score').textContent = stats.quality.avgScore;
                 document.getElementById('stat-quality').textContent = 'FPS:' + stats.quality.avgFps + ' Ping:' + stats.quality.avgPing + 'ms';
-                
                 document.getElementById('stat-brainrots').textContent = stats.recentBrainrots;
                 
-                // Update bots table
-                const tbody = document.getElementById('bots-tbody');
-                if (bots.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; opacity: 0.5;">No bots yet...</td></tr>';
-                } else {
-                    tbody.innerHTML = bots.map(bot => {
-                        let statusClass = 'idle';
-                        let statusText = '❌ IDLE';
-                        if (bot.secondsSinceLastSeen < 15) {
-                            statusClass = 'active';
-                            statusText = '✅ ACTIVE';
-                        } else if (bot.secondsSinceLastSeen < 60) {
-                            statusClass = 'slow';
-                            statusText = '⚠️ SLOW';
-                        }
-                        return \`<tr>
-                            <td style="font-weight: 900;">\${bot.name}</td>
-                            <td>\${bot.jobsReceived}</td>
-                            <td>\${bot.secondsSinceLastSeen}s ago</td>
-                            <td><span class="\${statusClass}">\${statusText}</span></td>
-                        </tr>\`;
-                    }).join('');
-                }
+                updateBotDisplay();
             } catch (e) {
                 console.error('Update error:', e);
+            }
+        }
+        
+        async function updateBotDisplay() {
+            try {
+                const bots = await fetch("/bots").then(r => r.json());
+                const list = document.getElementById('bots-list');
+                
+                if (bots.length === 0) {
+                    list.innerHTML = '<div style="text-align: center; opacity: 0.5; padding: 40px;">No bots yet...</div>';
+                    return;
+                }
+                
+                list.innerHTML = bots.map(bot => {
+                    let statusClass = 'status-idle';
+                    let statusText = '❌ IDLE';
+                    let statusColor = '#f55';
+                    
+                    if (bot.secondsSinceLastSeen < 15) {
+                        statusClass = 'status-active';
+                        statusText = '✅ ACTIVE';
+                        statusColor = '#00ff00';
+                    } else if (bot.secondsSinceLastSeen < 60) {
+                        statusClass = 'status-slow';
+                        statusText = '⚠️ SLOW';
+                        statusColor = '#fa0';
+                    }
+                    
+                    const baseHeight = 140;
+                    const scaledHeight = baseHeight * sizeMultiplier;
+                    
+                    return \`<div class="bot-card" style="min-height: \${scaledHeight}px; border-color: \${statusColor};">
+                        <div class="bot-name" style="font-size: \${32 * sizeMultiplier}px;">\${bot.name}</div>
+                        <div class="bot-stats" style="font-size: \${13 * sizeMultiplier}px;">
+                            <div class="bot-stat">Jobs: \${bot.jobsReceived}</div>
+                            <div class="bot-stat">Seen: \${bot.secondsSinceLastSeen}s ago</div>
+                            <div class="bot-stat bot-status \${statusClass}">\${statusText}</div>
+                        </div>
+                        <div class="timer-bar" style="background: \${statusColor}; width: \${Math.max(0, Math.min(100, (bot.secondsSinceLastSeen / 100) * 100))}%;"></div>
+                    </div>\`;
+                }).join('');
+            } catch (e) {
+                console.error('Display error:', e);
             }
         }
         
