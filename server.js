@@ -1,7 +1,9 @@
-// Godzilla Notifier Backend - v8.1 + Discord Webhooks
-// Base = v5.0 (cascade fallback proxies, qui marchait sans 429)
-// + Scoring FPS/Ping + dashboard ameliore + DISCORD ALERTS
-// v8.1 : liste de bots COMPLETE (plus de limite a 15)
+// Godzilla Notifier Backend - v8.3 COMPLETE + DISCORD OPTIMIZED
+// Base = v5.0 (cascade fallback proxies)
+// + Scoring FPS/Ping + dashboard amélioré + DISCORD ALERTS
+// v8.1 : liste de bots COMPLETE
+// v8.2 : FIX rate limiting logs + FIX affichage 1000/M + FIX clear bots
+// v8.3 : FIX formatMoney() + Discord batching anti-spam
 // By SALAH
 
 const express = require('express');
@@ -27,14 +29,82 @@ const MIN_FPS = 35;
 const MAX_PING = 500;
 const TOP_DISTRIBUTION_RATIO = 0.7;
 
+// ============================================================
+// FIX #1: RATE LIMITING POUR LES LOGS
+// ============================================================
+const LOG_BATCH_SIZE = 50;
+const LOG_BATCH_INTERVAL = 5000;
+let logBuffer = [];
+let logBatchTimer = null;
+
+function flushLogBatch() {
+    if (logBuffer.length === 0) return;
+    
+    const batch = logBuffer.splice(0, LOG_BATCH_SIZE);
+    console.log(`[LOG BATCH] Flushing ${batch.length} logs`);
+    
+    batch.forEach(log => {
+        liveLogs.unshift(log);
+    });
+    
+    if (liveLogs.length > MAX_LOGS) liveLogs.length = MAX_LOGS;
+    
+    if (logBuffer.length > 0) {
+        logBatchTimer = setTimeout(flushLogBatch, LOG_BATCH_INTERVAL);
+    }
+}
+
+// ============================================================
+// FIX DISCORD: formatMoney() + Batching webhook
+// ============================================================
+
+// Queue batching Discord
+let discordQueue = [];
+let discordBatchTimer = null;
+const DISCORD_BATCH_SIZE = 3;
+const DISCORD_BATCH_INTERVAL = 2000;
+const ANTI_SPAM_DELAY = 300;
+
+// Fonction fmt() correcte - 1B vs 1000M
+function formatMoney(n) {
+    if (!n || n === 0) return '$0/s';
+    const a = Math.abs(n);
+    
+    if (a >= 1e12) return '$' + (n / 1e12).toFixed(1).replace(/\.0$/, '') + 'T/s';
+    if (a >= 1e9)  return '$' + (n / 1e9).toFixed(1).replace(/\.0$/, '') + 'B/s';
+    if (a >= 1e6)  return '$' + (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M/s';
+    if (a >= 1e3)  return '$' + (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K/s';
+    return '$' + Math.round(n) + '/s';
+}
+
+async function flushDiscordBatch() {
+    if (discordQueue.length === 0) return;
+    
+    const batch = discordQueue.splice(0, DISCORD_BATCH_SIZE);
+    console.log(`[DISCORD BATCH] Sending ${batch.length} alerts`);
+    
+    for (const brainrot of batch) {
+        try {
+            await sendDiscordAlertSync(brainrot);
+            await new Promise(r => setTimeout(r, ANTI_SPAM_DELAY));
+        } catch (e) {
+            console.error('[DISCORD] Batch error:', e.message);
+        }
+    }
+    
+    if (discordQueue.length > 0) {
+        discordBatchTimer = setTimeout(flushDiscordBatch, DISCORD_BATCH_INTERVAL);
+    }
+}
+
 // DISCORD WEBHOOKS
-const DISCORD_WEBHOOK_HIGH = 'https://canary.discord.com/api/webhooks/1507761205538984078/nTwxZcOLQT9oruC14PMyt8rQ48xlE4mutp2A6FPh01hZtEePvAp7cMZGo-HKftBhkBCF'; // 100M+
-const DISCORD_WEBHOOK_LOW = 'https://canary.discord.com/api/webhooks/1510346972656046341/GLNbbYoVrw8DD_VbmruLgm_jwgGZ_LJlDzpB2C1RQlQiuNIO0sblEp2rHfJvry5KPJau'; // < 100M
-const DISCORD_THRESHOLD = 100000000; // 100M
-const IMAGE_CACHE = new Map(); // Cache les images pendant 1h
+const DISCORD_WEBHOOK_HIGH = 'https://canary.discord.com/api/webhooks/1507761205538984078/nTwxZcOLQT9oruC14PMyt8rQ48xlE4mutp2A6FPh01hZtEePvAp7cMZGo-HKftBhkBCF';
+const DISCORD_WEBHOOK_LOW = 'https://canary.discord.com/api/webhooks/1510346972656046341/GLNbbYoVrw8DD_VbmruLgm_jwgGZ_LJlDzpB2C1RQlQiuNIO0sblEp2rHfJvry5KPJau';
+const DISCORD_THRESHOLD = 100000000;
+const IMAGE_CACHE = new Map();
 const IMAGE_CACHE_TTL = 3600000;
 
-// CASCADE FALLBACK — essaie chaque proxy dans l'ordre
+// CASCADE FALLBACK
 const PROXIES = [
     'https://calm-glade-1ffa.jedab27255.workers.dev',
     'https://roblox-proxy.salahelarabi03.workers.dev',
@@ -88,7 +158,6 @@ setInterval(() => {
     for (const [k, v] of botHistory.entries()) { if (now - v.lastSeen > BOT_HISTORY_TTL) botHistory.delete(k); }
     for (let i = recentBrainrots.length - 1; i >= 0; i--) { if (recentBrainrots[i].expiresAt < now) recentBrainrots.splice(i, 1); }
     
-    // Nettoie le cache d'images
     for (const [k, v] of IMAGE_CACHE.entries()) {
         if (now - v.cachedAt > IMAGE_CACHE_TTL) IMAGE_CACHE.delete(k);
     }
@@ -100,18 +169,16 @@ setInterval(() => {
 
 async function getImageUrl(name) {
     try {
-        // Vérifie le cache
         if (IMAGE_CACHE.has(name)) {
             const cached = IMAGE_CACHE.get(name);
             return cached.url;
         }
 
-        // Essaie plusieurs variantes du nom
         const variants = [
-            name.replace(/ /g, '').replace(/[^\w-]/g, ''), // Sans espaces ni caractères spéciaux
-            name.replace(/[^\w\s-]/g, '').trim(), // Garde espaces et tirets
-            name.replace(/\[.*?\]\s*/g, '').trim(), // Enlève les [crochets]
-            name.split(' ')[0] // Juste le premier mot
+            name.replace(/ /g, '').replace(/[^\w-]/g, ''),
+            name.replace(/[^\w\s-]/g, '').trim(),
+            name.replace(/\[.*?\]\s*/g, '').trim(),
+            name.split(' ')[0]
         ];
 
         for (const title of variants) {
@@ -139,15 +206,13 @@ async function getImageUrl(name) {
                         const page = data.query.pages[pageId];
                         if (page.thumbnail && page.thumbnail.source) {
                             const imageUrl = page.thumbnail.source;
-                            // Cache l'image
                             IMAGE_CACHE.set(name, { url: imageUrl, cachedAt: Date.now() });
-                            console.log('[IMAGE] ✅ Found:', title, '->', imageUrl.substring(0, 80) + '...');
+                            console.log('[IMAGE] ✅ Found:', title);
                             return imageUrl;
                         }
                     }
                 }
             } catch (e) {
-                // Essaie la variante suivante
                 continue;
             }
         }
@@ -155,16 +220,16 @@ async function getImageUrl(name) {
         console.log('[IMAGE] ⚠️ No image found for:', name);
         return null;
     } catch (e) {
-        console.error('[IMAGE] Erreur fetch:', e.message);
+        console.error('[IMAGE] Error:', e.message);
         return null;
     }
 }
 
 // ============================================================
-// SEND DISCORD ALERT
+// DISCORD ALERT (Sync - appelé depuis batch)
 // ============================================================
 
-async function sendDiscordAlert(brainrot) {
+async function sendDiscordAlertSync(brainrot) {
     try {
         const isHighValue = brainrot.numeric >= DISCORD_THRESHOLD;
         const webhook = isHighValue ? DISCORD_WEBHOOK_HIGH : DISCORD_WEBHOOK_LOW;
@@ -173,14 +238,16 @@ async function sendDiscordAlert(brainrot) {
         const sourceEmoji = brainrot.source === 'plot' ? '🏰' : brainrot.source === 'carpet' ? '🧞' : '✨';
         const mutationText = brainrot.mutation && brainrot.mutation !== 'None' ? ` • [${brainrot.mutation}]` : '';
         
+        const formattedValue = formatMoney(brainrot.numeric);
+        
         const embed = {
             author: {
                 name: '⭐ GODZILLA DETECTED',
                 icon_url: 'https://cdn.discordapp.com/avatars/1510343157689565184/a_94c6c0c4b3c1a0d0a1b2c3d4e5f6g7h.gif'
             },
             title: brainrot.name + mutationText,
-            description: `**$${(brainrot.numeric / 1e6).toFixed(1)}M/s**`,
-            color: isHighValue ? 16711680 : 12745742, // Red pour 100M+, Gold sinon
+            description: `**${formattedValue}**`,
+            color: isHighValue ? 16711680 : 12745742,
             image: imageUrl ? { url: imageUrl, height: 400, width: 400 } : undefined,
             fields: [
                 {
@@ -214,7 +281,7 @@ async function sendDiscordAlert(brainrot) {
         const payload = {
             username: 'Godzilla Alerte',
             avatar_url: 'https://cdn.discordapp.com/avatars/1510343157689565184/a_94c6c0c4b3c1a0d0a1b2c3d4e5f6g7h.gif',
-            content: isHighValue ? `🔥 **ALERTE 100M+** 🔥\n${brainrot.name} - $${(brainrot.numeric / 1e6).toFixed(1)}M/s` : null,
+            content: isHighValue ? `🔥 **ALERTE 100M+** 🔥\n${brainrot.name} - ${formattedValue}` : null,
             embeds: [embed]
         };
 
@@ -226,17 +293,35 @@ async function sendDiscordAlert(brainrot) {
 
         if (!response.ok) {
             console.error('[DISCORD] HTTP Error:', response.status, response.statusText);
+            if (response.status === 429) {
+                const retryAfter = response.headers.get('retry-after') || '5';
+                console.error('[DISCORD] Rate limited! Wait ' + retryAfter + 's');
+            }
         } else {
-            console.log('[DISCORD] Alert sent:', brainrot.name, `($${(brainrot.numeric / 1e6).toFixed(1)}M)`, isHighValue ? '🔥 HIGH' : '💎 LOW');
+            console.log('[DISCORD] Alert sent:', brainrot.name, `(${formattedValue})`, isHighValue ? '🔥 HIGH' : '💎 LOW');
         }
     } catch (e) {
-        console.error('[DISCORD] Erreur:', e.message);
-        // Continue malgré l'erreur - ne pas casser le service
+        console.error('[DISCORD] Error:', e.message);
+    }
+}
+
+// Wrapper - QUEUE au lieu d'envoyer direct
+async function sendDiscordAlert(brainrot) {
+    discordQueue.push(brainrot);
+    
+    if (discordQueue.length >= DISCORD_BATCH_SIZE) {
+        clearTimeout(discordBatchTimer);
+        await flushDiscordBatch();
+        return;
+    }
+    
+    if (!discordBatchTimer) {
+        discordBatchTimer = setTimeout(flushDiscordBatch, DISCORD_BATCH_INTERVAL);
     }
 }
 
 // ============================================================
-// FETCH — Cascade fallback (proven anti-429)
+// FETCH — Cascade fallback
 // ============================================================
 
 async function fetchServers(cursor) {
@@ -268,7 +353,7 @@ async function fetchServers(cursor) {
 }
 
 // ============================================================
-// SCAN — 1 seul scan loop, fresh pool a chaque cycle
+// SCAN
 // ============================================================
 
 async function scanPool() {
@@ -302,7 +387,7 @@ async function scanPool() {
     }
 
     if (pagesScanned === 0) {
-        console.log('[SCAN] Tous les proxies dead, pool conserve (' + pool.length + ' serveurs)');
+        console.log('[SCAN] All proxies dead, pool conservé (' + pool.length + ' serveurs)');
         return;
     }
 
@@ -324,7 +409,7 @@ async function scanPool() {
 
 async function scanLoop() {
     while (true) {
-        try { await scanPool(); } catch (e) { console.error('[SCAN] Erreur:', e.message); }
+        try { await scanPool(); } catch (e) { console.error('[SCAN] Error:', e.message); }
         await new Promise(r => setTimeout(r, SCAN_INTERVAL));
     }
 }
@@ -334,7 +419,7 @@ async function scanLoop() {
 // ============================================================
 
 app.get('/', (req, res) => res.json({
-    name: 'Godzilla Notifier', version: '8.1 + Discord',
+    name: 'Godzilla Notifier', version: '8.3 Complete',
     pool: pool.length,
     config: { scanInterval: SCAN_INTERVAL + 'ms', maxPages: MAX_PAGES, proxies: PROXIES.length }
 }));
@@ -374,7 +459,6 @@ app.get('/jobs', (req, res) => {
         stats.jobsServedRandom++;
     }
 
-    // Retire du pool pour ne plus le redistribuer
     const idx = pool.findIndex(s => s.jobId === selected.jobId);
     if (idx !== -1) pool.splice(idx, 1);
 
@@ -383,7 +467,7 @@ app.get('/jobs', (req, res) => {
     botData.visitedJobs.add(selected.jobId);
     stats.jobsServed++;
 
-    console.log('[JOBS] ' + username + ' -> ' + selected.jobId.substring(0, 12) + '... Score:' + selected.score + ' (' + (useTopScore ? 'TOP' : 'RND') + ') Pool reste: ' + pool.length);
+    console.log('[JOBS] ' + username + ' -> ' + selected.jobId.substring(0, 12) + '... Score:' + selected.score + ' (' + (useTopScore ? 'TOP' : 'RND') + ')');
     res.send(selected.jobId);
 });
 
@@ -404,7 +488,6 @@ app.post('/report-data', (req, res) => {
                     const newBrainrot = { botName, jobId, name: item.name, money: item.money, numeric: item.numeric, mutation: item.mutation || null, source: item.source || 'unknown', players: players || 0, receivedAt: now, expiresAt: now + BRAINROT_TTL };
                     recentBrainrots.unshift(newBrainrot);
                     
-                    // 🔥 ENVOIE L'ALERTE DISCORD (async, non-blocking)
                     sendDiscordAlert(newBrainrot).catch(e => console.error('[DISCORD] Failed:', e));
                 }
             }
@@ -418,10 +501,19 @@ app.post('/log', (req, res) => {
     if (!checkAuth(req, res)) return;
     const { botName = 'unknown', message = '' } = req.body || {};
     if (!message) return res.status(400).json({ error: 'Missing message' });
+    
     stats.logsReceived++;
-    liveLogs.unshift({ botName, message, timestamp: Date.now() });
-    if (liveLogs.length > MAX_LOGS) liveLogs.length = MAX_LOGS;
-    res.json({ success: true });
+    logBuffer.push({ botName, message, timestamp: Date.now() });
+    
+    if (logBuffer.length >= LOG_BATCH_SIZE) {
+        clearTimeout(logBatchTimer);
+        flushLogBatch();
+        logBatchTimer = setTimeout(flushLogBatch, LOG_BATCH_INTERVAL);
+    } else if (!logBatchTimer) {
+        logBatchTimer = setTimeout(flushLogBatch, LOG_BATCH_INTERVAL);
+    }
+    
+    res.json({ success: true, queued: logBuffer.length });
 });
 
 app.get('/stats', (req, res) => {
@@ -435,7 +527,8 @@ app.get('/stats', (req, res) => {
         reportsReceived: stats.reportsReceived, reportsWithBrainrots: stats.reportsWithBrainrots,
         reportsHitRate: stats.reportsReceived > 0 ? Math.round((stats.reportsWithBrainrots / stats.reportsReceived) * 100) + '%' : '0%',
         activeBots: botHistory.size, recentBrainrots: recentBrainrots.length,
-        quality: poolQualityStats
+        quality: poolQualityStats,
+        discord: { queuedAlerts: discordQueue.length, batchSize: DISCORD_BATCH_SIZE, batchInterval: DISCORD_BATCH_INTERVAL }
     });
 });
 
@@ -459,6 +552,17 @@ app.get('/api/brainrots', (req, res) => {
     })));
 });
 
+app.delete('/api/bots', (req, res) => {
+    if (!checkAuth(req, res)) return;
+    
+    const deletedBots = botHistory.size;
+    botHistory.clear();
+    jobLocks.clear();
+    
+    console.log('[CLEAR] ✅ Cleared ' + deletedBots + ' bots');
+    res.json({ success: true, deleted: deletedBots });
+});
+
 app.get('/live-monitor', (req, res) => {
     res.send(`<!DOCTYPE html>
 <html lang="fr">
@@ -468,7 +572,6 @@ app.get('/live-monitor', (req, res) => {
     <title>Godzilla Live Monitor v9</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        
         body {
             font-family: 'Courier New', monospace;
             background: #000;
@@ -476,7 +579,6 @@ app.get('/live-monitor', (req, res) => {
             min-height: 100vh;
             padding: 20px;
         }
-        
         .bg {
             position: fixed;
             top: 0; left: 0;
@@ -487,9 +589,7 @@ app.get('/live-monitor', (req, res) => {
             background-size: 40px 40px;
             z-index: -1;
         }
-        
         .container { max-width: 1400px; margin: 0 auto; }
-        
         .header {
             text-align: center;
             margin-bottom: 30px;
@@ -498,7 +598,6 @@ app.get('/live-monitor', (req, res) => {
             background: rgba(0, 255, 0, 0.05);
             box-shadow: 0 0 20px rgba(0,255,0,0.2);
         }
-        
         .header h1 {
             font-size: 52px;
             text-shadow: 0 0 20px #00ff00;
@@ -506,14 +605,12 @@ app.get('/live-monitor', (req, res) => {
             font-weight: 900;
             margin-bottom: 10px;
         }
-        
         .subtitle {
             font-size: 12px;
             opacity: .7;
             text-transform: uppercase;
             letter-spacing: 3px;
         }
-        
         .controls {
             display: flex;
             gap: 20px;
@@ -525,13 +622,11 @@ app.get('/live-monitor', (req, res) => {
             border: 2px solid #00ff00;
             background: rgba(0, 255, 0, 0.03);
         }
-        
         .slider-group {
             display: flex;
             align-items: center;
             gap: 15px;
         }
-        
         .slider-label {
             font-size: 12px;
             font-weight: 900;
@@ -539,19 +634,16 @@ app.get('/live-monitor', (req, res) => {
             letter-spacing: 2px;
             color: #ffff00;
         }
-        
         input[type="range"] {
             width: 200px;
             cursor: pointer;
         }
-        
         .slider-value {
             font-size: 16px;
             font-weight: 900;
             color: #ffff00;
             min-width: 60px;
         }
-        
         .clear-btn {
             background: #f55;
             color: #000;
@@ -565,19 +657,21 @@ app.get('/live-monitor', (req, res) => {
             transition: all 0.3s;
             font-family: 'Courier New', monospace;
         }
-        
         .clear-btn:hover {
             background: #ff0000;
             box-shadow: 0 0 30px rgba(255, 0, 0, 0.8);
         }
-        
+        .clear-btn:disabled {
+            background: #888;
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
         .grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
             gap: 15px;
             margin-bottom: 30px;
         }
-        
         .stat-box {
             background: rgba(0, 255, 0, 0.05);
             border: 2px solid #00ff00;
@@ -586,12 +680,10 @@ app.get('/live-monitor', (req, res) => {
             box-shadow: 0 0 15px rgba(0,255,0,0.2);
             transition: all 0.3s;
         }
-        
         .stat-box:hover {
             transform: translateY(-3px);
             box-shadow: 0 0 25px rgba(0,255,0,0.4);
         }
-        
         .stat-label {
             font-size: 11px;
             opacity: .7;
@@ -599,27 +691,23 @@ app.get('/live-monitor', (req, res) => {
             margin-bottom: 10px;
             letter-spacing: 2px;
         }
-        
         .stat-value {
             font-size: 42px;
             font-weight: 900;
             color: #ffff00;
             text-shadow: 0 0 10px #ffff00;
         }
-        
         .stat-sub {
             font-size: 11px;
             opacity: .6;
             margin-top: 8px;
         }
-        
         .bots-section {
             background: #000;
             border: 2px solid #00ff00;
             padding: 25px;
             box-shadow: 0 0 15px rgba(0,255,0,0.2);
         }
-        
         .bots-title {
             font-size: 16px;
             font-weight: 900;
@@ -628,12 +716,10 @@ app.get('/live-monitor', (req, res) => {
             text-transform: uppercase;
             letter-spacing: 2px;
         }
-        
         .bots-list {
             display: grid;
             gap: 20px;
         }
-        
         .bot-card {
             background: #000;
             border: 2px solid #00ff00;
@@ -643,11 +729,9 @@ app.get('/live-monitor', (req, res) => {
             overflow: hidden;
             transition: all 0.3s;
         }
-        
         .bot-card:hover {
             box-shadow: 0 0 20px rgba(0, 255, 0, 0.4);
         }
-        
         .bot-name {
             font-size: 32px;
             font-weight: 900;
@@ -656,35 +740,22 @@ app.get('/live-monitor', (req, res) => {
             letter-spacing: 2px;
             margin-bottom: 12px;
         }
-        
         .bot-stats {
             display: flex;
             gap: 20px;
             font-size: 13px;
             margin-bottom: 12px;
         }
-        
         .bot-stat {
             opacity: .7;
         }
-        
         .bot-status {
             font-size: 16px;
             font-weight: 900;
         }
-        
-        .status-active {
-            color: #00ff00;
-        }
-        
-        .status-slow {
-            color: #fa0;
-        }
-        
-        .status-idle {
-            color: #f55;
-        }
-        
+        .status-active { color: #00ff00; }
+        .status-slow { color: #fa0; }
+        .status-idle { color: #f55; }
         .timer-bar {
             position: absolute;
             bottom: 0;
@@ -693,19 +764,6 @@ app.get('/live-monitor', (req, res) => {
             background: #00ff00;
             transition: all 0.3s;
         }
-        
-        .timer-green {
-            background: #00ff00;
-        }
-        
-        .timer-orange {
-            background: #fa0;
-        }
-        
-        .timer-red {
-            background: #f55;
-        }
-        
         .footer {
             text-align: center;
             padding: 20px;
@@ -715,7 +773,6 @@ app.get('/live-monitor', (req, res) => {
             text-transform: uppercase;
             margin-top: 40px;
         }
-        
         @media (max-width: 768px) {
             .header h1 { font-size: 36px; }
             .stat-value { font-size: 32px; }
@@ -730,7 +787,7 @@ app.get('/live-monitor', (req, res) => {
     <div class="container">
         <div class="header">
             <h1>🔥 GODZILLA LIVE MONITOR 🔥</h1>
-            <div class="subtitle">v9.0 Enhanced — Real-time Bot Status</div>
+            <div class="subtitle">v9.1 Enhanced — Real-time Bot Status</div>
         </div>
         
         <div class="controls">
@@ -739,7 +796,7 @@ app.get('/live-monitor', (req, res) => {
                 <input type="range" id="sizeSlider" min="1" max="2.5" step="0.1" value="1" />
                 <span class="slider-value" id="sizeValue">1.0x</span>
             </div>
-            <button class="clear-btn" onclick="if(confirm('Clear all bots?')) clearAllBots()">❌ CLEAR ALL BOTS</button>
+            <button class="clear-btn" id="clearBtn" onclick="clearAllBots()">❌ CLEAR ALL BOTS</button>
         </div>
         
         <div class="grid" id="stats-grid">
@@ -783,7 +840,7 @@ app.get('/live-monitor', (req, res) => {
         </div>
         
         <div class="footer">
-            Dev by SALAH | Godzilla v9.0+ | Auto-refresh 2s | /dashboard | /stats
+            Dev by SALAH | Godzilla v9.1+ | Auto-refresh 2s | /dashboard | /stats
         </div>
     </div>
     
@@ -798,11 +855,46 @@ app.get('/live-monitor', (req, res) => {
         });
         
         async function clearAllBots() {
+            const btn = document.getElementById('clearBtn');
+            btn.disabled = true;
+            btn.textContent = '⏳ CLEARING...';
+            
             try {
-                await fetch('/api/brainrots', { method: 'DELETE' });
-                updateMonitor();
+                const response = await fetch('/api/bots', { 
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    alert('Error: ' + (error.error || 'Unknown error'));
+                    btn.textContent = '❌ CLEAR ALL BOTS';
+                    btn.disabled = false;
+                    return;
+                }
+                
+                const result = await response.json();
+                console.log('Cleared:', result);
+                
+                const botsList = document.getElementById('bots-list');
+                botsList.innerHTML = '<div style="text-align: center; opacity: 0.5; padding: 40px;">No bots yet...</div>';
+                
+                const stats = await fetch("/stats").then(r => r.json());
+                const uptime = Math.floor(stats.uptime / 60);
+                
+                document.getElementById('stat-active').textContent = '0/' + result.deleted;
+                document.getElementById('stat-uptime').textContent = uptime + 'min uptime';
+                
+                btn.textContent = '✅ CLEARED ' + result.deleted + ' BOTS';
+                setTimeout(() => {
+                    btn.textContent = '❌ CLEAR ALL BOTS';
+                    btn.disabled = false;
+                }, 3000);
             } catch (e) {
                 console.error('Clear failed:', e);
+                alert('Failed to clear: ' + e.message);
+                btn.textContent = '❌ CLEAR ALL BOTS';
+                btn.disabled = false;
             }
         }
         
@@ -845,15 +937,17 @@ app.get('/live-monitor', (req, res) => {
                 }
                 
                 list.innerHTML = bots.map(bot => {
+                    const secondsSince = bot.secondsSinceLastSeen;
+                    
                     let statusClass = 'status-idle';
                     let statusText = '❌ IDLE';
                     let statusColor = '#f55';
                     
-                    if (bot.secondsSinceLastSeen < 15) {
+                    if (secondsSince < 60) {
                         statusClass = 'status-active';
                         statusText = '✅ ACTIVE';
                         statusColor = '#00ff00';
-                    } else if (bot.secondsSinceLastSeen < 60) {
+                    } else if (secondsSince < 100) {
                         statusClass = 'status-slow';
                         statusText = '⚠️ SLOW';
                         statusColor = '#fa0';
@@ -861,15 +955,16 @@ app.get('/live-monitor', (req, res) => {
                     
                     const baseHeight = 140;
                     const scaledHeight = baseHeight * sizeMultiplier;
+                    const progressWidth = Math.max(0, Math.min(100, (secondsSince / 120) * 100));
                     
                     return \`<div class="bot-card" style="min-height: \${scaledHeight}px; border-color: \${statusColor};">
                         <div class="bot-name" style="font-size: \${32 * sizeMultiplier}px;">\${bot.name}</div>
                         <div class="bot-stats" style="font-size: \${13 * sizeMultiplier}px;">
                             <div class="bot-stat">Jobs: \${bot.jobsReceived}</div>
-                            <div class="bot-stat">Seen: \${bot.secondsSinceLastSeen}s ago</div>
+                            <div class="bot-stat">Seen: \${secondsSince}s ago</div>
                             <div class="bot-stat bot-status \${statusClass}">\${statusText}</div>
                         </div>
-                        <div class="timer-bar" style="background: \${statusColor}; width: \${Math.max(0, Math.min(100, (bot.secondsSinceLastSeen / 100) * 100))}%;"></div>
+                        <div class="timer-bar" style="background: \${statusColor}; width: \${progressWidth}%;"></div>
                     </div>\`;
                 }).join('');
             } catch (e) {
@@ -885,19 +980,23 @@ app.get('/live-monitor', (req, res) => {
 });
 
 app.get('/dashboard', (req, res) => {
-    res.send('<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Godzilla Notifier</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Courier New,monospace;background:#000;color:#00ff00;min-height:100vh;padding:20px}.bg{position:fixed;top:0;left:0;width:100%;height:100%;background-image:linear-gradient(rgba(0,255,0,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,0,.03) 1px,transparent 1px);background-size:50px 50px;z-index:-1}.container{max-width:1200px;margin:0 auto}.header{text-align:center;margin-bottom:40px;padding:30px;border:3px solid #00ff00}.header h1{font-size:48px;text-shadow:0 0 20px #00ff00;letter-spacing:8px;font-weight:900}.subtitle{font-size:13px;opacity:.8;text-transform:uppercase;letter-spacing:4px;margin-top:8px}.empty{text-align:center;padding:100px 20px;font-size:20px;border:3px dashed #00ff00;opacity:.3;text-transform:uppercase;letter-spacing:3px}.list{display:grid;gap:20px}.card{background:#000;border:3px solid #00ff00;padding:25px;position:relative;overflow:hidden;box-shadow:0 0 20px rgba(0,255,0,.3)}.top-card{border-color:#ffd700!important;box-shadow:0 0 30px rgba(255,215,0,.5)!important}.row{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}.name{font-size:24px;font-weight:900;color:#fff}.val{font-size:40px;font-weight:900;color:#00ff00;text-shadow:0 0 15px #00ff00}.badge{display:inline-block;padding:5px 10px;background:#00ff00;color:#000;font-size:11px;font-weight:900;margin-right:5px;margin-bottom:8px}.gold{background:#ffd700}.meta{font-size:12px;opacity:.6;margin-bottom:12px}.foot{display:flex;gap:10px;align-items:center}.btn{background:#00ff00;color:#000;border:none;padding:10px 25px;font-size:15px;font-weight:900;cursor:pointer;font-family:inherit}.timer{border:2px solid #00ff00;padding:7px 14px;font-size:17px;font-weight:900;min-width:65px;text-align:center}.fr{color:#00ff00}.md{color:#fa0}.xp{color:#f55}.prog{position:absolute;bottom:0;left:0;height:5px;background:#00ff00}.footer{text-align:center;margin-top:40px;padding:20px;opacity:.4;font-size:12px;border-top:1px solid #00ff00;text-transform:uppercase}</style></head><body><div class="bg"></div><div class="container"><div class="header"><h1>GODZILLA NOTIFIER</h1><div class="subtitle">v8.1 + Discord Webhooks — Cascade Fallback + Scoring</div></div><div id="app"><div class="empty">EN ATTENTE DE BRAINROTS...</div></div><div class="footer">Dev by SALAH | Discord Alerts Enabled | /live-monitor | /stats</div></div><script>function fmt(n){if(!n)return"$0/s";const a=Math.abs(n);if(a>=1e12)return"$"+(n/1e12).toFixed(1).replace(".0","")+"T/s";if(a>=1e9)return"$"+(n/1e9).toFixed(1).replace(".0","")+"B/s";if(a>=1e6)return"$"+(n/1e6).toFixed(1).replace(".0","")+"M/s";return"$"+(n/1e3).toFixed(1).replace(".0","")+"K/s";}function copy(t){navigator.clipboard.writeText(t).then(()=>{const d=document.createElement("div");d.style="position:fixed;top:20px;right:20px;background:#00ff00;color:#000;padding:15px 25px;font-weight:900;z-index:9999;";d.textContent="COPIE!";document.body.appendChild(d);setTimeout(()=>d.remove(),2000);})}function render(b){const c=document.getElementById("app");if(!b||!b.length){c.innerHTML=\'<div class="empty">EN ATTENTE DE BRAINROTS...</div>\';return;}b.sort((x,y)=>y.numeric-x.numeric);const l=document.createElement("div");l.className="list";b.forEach((x,i)=>{const r=x.remainingSeconds||0;const tc=r<10?"xp":r<20?"md":"fr";const d=document.createElement("div");d.className="card"+(i===0?" top-card":"");d.dataset.e=Date.now()+(r*1000);const src=x.source==="carpet"?"CARPET":x.source==="plot"?"PLOT":"UNKNOWN";const mut=x.mutation&&x.mutation!=="None"?"["+x.mutation+"] ":"";d.innerHTML=\'<div class="row"><div><div>\'+(i===0?\'<span class="badge gold">TOP</span>\':"")+ \'<span class="badge">\'+src+\'</span><span class="badge">\'+x.players+\'/8</span></div><div class="name">\'+mut+x.name+\'</div></div><div class="val">\'+fmt(x.numeric)+\'</div></div><div class="meta">BOT: \'+x.botName+\' &nbsp;|&nbsp; JOB: \'+x.jobId.substring(0,16)+\'...</div><div class="foot"><button class="btn" onclick="copy(\'+"\'"+x.jobId+"\'"+\')">JOIN</button><div class="timer \'+tc+\'">\'+r+\'s</div></div><div class="prog" style="width:\'+(r/30*100)+\'%"></div>\';l.appendChild(d);});c.innerHTML="";c.appendChild(l);}fetch("/api/brainrots").then(r=>r.json()).then(render);setInterval(()=>fetch("/api/brainrots").then(r=>r.json()).then(render),1000);setInterval(()=>{document.querySelectorAll(".card").forEach(c=>{const e=parseInt(c.dataset.e);if(!e)return;const r=Math.max(0,Math.ceil((e-Date.now())/1000));const te=c.querySelector(".timer");const pe=c.querySelector(".prog");if(te){te.textContent=r+"s";te.className="timer "+(r<10?"xp":r<20?"md":"fr");}if(pe)pe.style.width=(r/30*100)+"%";if(r<=0)c.remove();});},1000);</script></body></html>');
+    res.send(`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Godzilla Notifier</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Courier New,monospace;background:#000;color:#00ff00;min-height:100vh;padding:20px}.bg{position:fixed;top:0;left:0;width:100%;height:100%;background-image:linear-gradient(rgba(0,255,0,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,0,.03) 1px,transparent 1px);background-size:50px 50px;z-index:-1}.container{max-width:1200px;margin:0 auto}.header{text-align:center;margin-bottom:40px;padding:30px;border:3px solid #00ff00}.header h1{font-size:48px;text-shadow:0 0 20px #00ff00;letter-spacing:8px;font-weight:900}.subtitle{font-size:13px;opacity:.8;text-transform:uppercase;letter-spacing:4px;margin-top:8px}.empty{text-align:center;padding:100px 20px;font-size:20px;border:3px dashed #00ff00;opacity:.3;text-transform:uppercase;letter-spacing:3px}.list{display:grid;gap:20px}.card{background:#000;border:3px solid #00ff00;padding:25px;position:relative;overflow:hidden;box-shadow:0 0 20px rgba(0,255,0,.3)}.top-card{border-color:#ffd700!important;box-shadow:0 0 30px rgba(255,215,0,.5)!important}.row{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}.name{font-size:24px;font-weight:900;color:#fff}.val{font-size:40px;font-weight:900;color:#00ff00;text-shadow:0 0 15px #00ff00}.badge{display:inline-block;padding:5px 10px;background:#00ff00;color:#000;font-size:11px;font-weight:900;margin-right:5px;margin-bottom:8px}.gold{background:#ffd700}.meta{font-size:12px;opacity:.6;margin-bottom:12px}.foot{display:flex;gap:10px;align-items:center}.btn{background:#00ff00;color:#000;border:none;padding:10px 25px;font-size:15px;font-weight:900;cursor:pointer;font-family:inherit}.timer{border:2px solid #00ff00;padding:7px 14px;font-size:17px;font-weight:900;min-width:65px;text-align:center}.fr{color:#00ff00}.md{color:#fa0}.xp{color:#f55}.prog{position:absolute;bottom:0;left:0;height:5px;background:#00ff00}.footer{text-align:center;margin-top:40px;padding:20px;opacity:.4;font-size:12px;border-top:1px solid #00ff00;text-transform:uppercase}</style></head><body><div class="bg"></div><div class="container"><div class="header"><h1>GODZILLA NOTIFIER</h1><div class="subtitle">v8.3 Complete — Discord Webhooks Optimized</div></div><div id="app"><div class="empty">EN ATTENTE DE BRAINROTS...</div></div><div class="footer">Dev by SALAH | Discord Alerts Enabled | /live-monitor | /stats</div></div><script>function fmt(n){if(!n)return"$0/s";const a=Math.abs(n);if(a>=1e12)return"$"+(n/1e12).toFixed(1).replace(/\\.0$/,"")+"/T/s";if(a>=1e9)return"$"+(n/1e9).toFixed(1).replace(/\\.0$/,"")+"B/s";if(a>=1e6)return"$"+(n/1e6).toFixed(1).replace(/\\.0$/,"")+"M/s";if(a>=1e3)return"$"+(n/1e3).toFixed(1).replace(/\\.0$/,"")+"K/s";return"$"+Math.round(n)+"/s";}function copy(t){navigator.clipboard.writeText(t).then(()=>{const d=document.createElement("div");d.style="position:fixed;top:20px;right:20px;background:#00ff00;color:#000;padding:15px 25px;font-weight:900;z-index:9999;";d.textContent="COPIE!";document.body.appendChild(d);setTimeout(()=>d.remove(),2000);})}function render(b){const c=document.getElementById("app");if(!b||!b.length){c.innerHTML=\'<div class="empty">EN ATTENTE DE BRAINROTS...</div>\';return;}b.sort((x,y)=>y.numeric-x.numeric);const l=document.createElement("div");l.className="list";b.forEach((x,i)=>{const r=x.remainingSeconds||0;const tc=r<10?"xp":r<20?"md":"fr";const d=document.createElement("div");d.className="card"+(i===0?" top-card":"");d.dataset.e=Date.now()+(r*1000);const src=x.source==="carpet"?"CARPET":x.source==="plot"?"PLOT":"UNKNOWN";const mut=x.mutation&&x.mutation!=="None"?"["+x.mutation+"] ":"";d.innerHTML=\'<div class="row"><div><div>\'+(i===0?\'<span class="badge gold">TOP</span>\':"")+ \'<span class="badge">\'+src+\'</span><span class="badge">\'+x.players+\'/8</span></div><div class="name">\'+mut+x.name+\'</div></div><div class="val">\'+fmt(x.numeric)+\'</div></div><div class="meta">BOT: \'+x.botName+\' &nbsp;|&nbsp; JOB: \'+x.jobId.substring(0,16)+\'...</div><div class="foot"><button class="btn" onclick="copy(\'+"\'"+x.jobId+"\'"+\')">JOIN</button><div class="timer \'+tc+\'">\'+r+\'s</div></div><div class="prog" style="width:\'+(r/30*100)+\'%"></div>\';l.appendChild(d);});c.innerHTML="";c.appendChild(l);}fetch("/api/brainrots").then(r=>r.json()).then(render);setInterval(()=>fetch("/api/brainrots").then(r=>r.json()).then(render),1000);setInterval(()=>{document.querySelectorAll(".card").forEach(c=>{const e=parseInt(c.dataset.e);if(!e)return;const r=Math.max(0,Math.ceil((e-Date.now())/1000));const te=c.querySelector(".timer");const pe=c.querySelector(".prog");if(te){te.textContent=r+"s";te.className="timer "+(r<10?"xp":r<20?"md":"fr");}if(pe)pe.style.width=(r/30*100)+"%";if(r<=0)c.remove();});},1000);</script></body></html>`);
 });
 
 app.listen(PORT, () => {
     console.log('================================================');
-    console.log('GODZILLA NOTIFIER v8.1 + DISCORD WEBHOOKS');
+    console.log('GODZILLA NOTIFIER v8.3 DISCORD OPTIMIZED');
     console.log('PlaceId: ' + PLACE_ID);
     console.log('Scan: toutes les ' + (SCAN_INTERVAL/1000) + 's | Pages: ' + MAX_PAGES);
     console.log('Proxies cascade:');
     PROXIES.forEach(p => console.log('  - ' + p));
-    console.log('Discord Webhooks:');
-    console.log('  - 100M+: ' + DISCORD_WEBHOOK_HIGH.substring(0, 60) + '...');
-    console.log('  - < 100M: ' + DISCORD_WEBHOOK_LOW.substring(0, 60) + '...');
+    console.log('Discord Configuration:');
+    console.log('  - Webhook 100M+: ' + DISCORD_WEBHOOK_HIGH.substring(0, 60) + '...');
+    console.log('  - Webhook < 100M: ' + DISCORD_WEBHOOK_LOW.substring(0, 60) + '...');
+    console.log('  - Batch Size: ' + DISCORD_BATCH_SIZE + ' alerts max');
+    console.log('  - Batch Interval: ' + (DISCORD_BATCH_INTERVAL/1000) + 's (or flush if full)');
+    console.log('  - Anti-spam: ' + ANTI_SPAM_DELAY + 'ms delay entre chaque alert');
+    console.log('Log Batching: ' + LOG_BATCH_SIZE + ' max per ' + (LOG_BATCH_INTERVAL/1000) + 's');
     console.log('PORT: ' + PORT);
     console.log('================================================');
     scanLoop();
