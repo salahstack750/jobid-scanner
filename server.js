@@ -17,7 +17,7 @@ const API_KEY = process.env.API_KEY || 'SALAH2026';
 const PLACE_ID = 109983668079237;
 
 const SCAN_INTERVAL = 5000;
-const MAX_PAGES = 10;
+const MAX_PAGES = 20;
 const BRAINROT_TTL = 30 * 1000;
 const MIN_BRAINROT_VALUE = 1000000;
 const MAX_LOGS = 200;
