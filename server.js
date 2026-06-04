@@ -1,10 +1,8 @@
-// Godzilla Notifier Backend - v8.4 SIMPLIFIED
-// Base = v5.0 (cascade fallback proxies)
-// + 7/8 ONLY FILTER + BLACKLIST 10MIN + POOL RESET + DISCORD BATCHING
-// v8.1 : liste de bots COMPLETE
-// v8.2 : FIX rate limiting logs + FIX affichage 1000/M + FIX clear bots
-// v8.3 : FIX formatMoney() + Discord batching anti-spam
-// v8.4 : 7/8 ONLY + Blacklist 10min + Pool reset + No scoring FPS/Ping
+// Godzilla Notifier Backend - v9.0 PARALLEL SCAN
+// Base = v8.4
+// v9.0 : PAGINATION PARALLELE (X branches simultanees) + POOL accumulee
+//        => Beaucoup plus de serveurs, beaucoup plus vite
+//        Le Cloudflare Worker gere les IPs differentes
 // By SALAH
 
 const express = require('express');
@@ -16,8 +14,16 @@ const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || 'SALAH2026';
 const PLACE_ID = 109983668079237;
 
-const SCAN_INTERVAL = 100;
-const MAX_PAGES = 200;
+// ═══════════════════════════════════════════════════════════════
+// 🔥 CONFIG SCAN PARALLELE
+// ═══════════════════════════════════════════════════════════════
+const SCAN_INTERVAL = 1000;          // Pause entre 2 cycles complets
+const MAX_PAGES = 2000;              // Pages max par branche
+const PARALLEL_BRANCHES = 8;         // 8 branches en PARALLELE (le coeur du boost)
+const PAGE_DELAY = 0;                // 0ms entre pages (Worker gere le rate limit)
+const POOL_MERGE = true;             // true = accumule la pool, false = reset a chaque scan
+const POOL_MAX_SIZE = 5000;          // Cap de securite memoire
+
 const BRAINROT_TTL = 30 * 1000;
 const MIN_BRAINROT_VALUE = 1000000;
 const MAX_LOGS = 200;
@@ -81,13 +87,15 @@ const DISCORD_THRESHOLD = 100000000;
 const IMAGE_CACHE = new Map();
 const IMAGE_CACHE_TTL = 3600000;
 
-const PROXIES = [
-    'https://roblox-proxy.salahelarabi03.workers.dev',
-    'https://games.roproxy.com',
-    'https://games.roblox.com'
-];
+// ═══════════════════════════════════════════════════════════════
+// 🌐 PROXY = uniquement le Cloudflare Worker (IPs differentes auto)
+//    + fallback direct si le Worker tombe
+// ═══════════════════════════════════════════════════════════════
+const PROXY = 'https://roblox-proxy.salahelarabi03.workers.dev';
+const PROXY_FALLBACK = 'https://games.roproxy.com';
 
 let pool = [];
+const poolSeen = new Set();          // dedup des jobId dans la pool
 const jobLocks = new Map();
 const botHistory = new Map();
 const reports = new Map();
@@ -100,7 +108,10 @@ const stats = {
     reportsReceived: 0, 
     reportsWithBrainrots: 0, 
     logsReceived: 0,
-    startedAt: Date.now()
+    startedAt: Date.now(),
+    lastScanPages: 0,
+    lastScanFound: 0,
+    lastScanDuration: 0
 };
 
 const blacklist = new Map();
@@ -206,7 +217,7 @@ async function sendDiscordAlertSync(brainrot) {
                 { name: isHighValue ? '🔥 PREMIUM' : '💎 Standard', value: isHighValue ? 'High Value' : 'Regular', inline: true }
             ],
             footer: {
-                text: 'Godzilla Notifier',
+                text: 'Godzilla Notifier v9.0',
                 icon_url: 'https://cdn.discordapp.com/avatars/1510343157689565184/a_94c6c0c4b3c1a0d0a1b2c3d4e5f6g7h.gif'
             },
             timestamp: new Date().toISOString()
@@ -251,14 +262,16 @@ async function sendDiscordAlert(brainrot) {
     }
 }
 
-async function fetchServers(cursor) {
+// ═══════════════════════════════════════════════════════════════
+// 🌐 FETCH une page (via Worker, fallback si KO)
+// ═══════════════════════════════════════════════════════════════
+async function fetchServersPage(cursor) {
     const path = '/v1/games/' + PLACE_ID + '/servers/Public?limit=100&excludeFullGames=true' + (cursor ? '&cursor=' + cursor : '');
-    for (const proxy of PROXIES) {
-        const url = proxy + path;
+    for (const base of [PROXY, PROXY_FALLBACK]) {
         try {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 8000);
-            const response = await fetch(url, {
+            const response = await fetch(base + path, {
                 signal: controller.signal,
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -271,41 +284,114 @@ async function fetchServers(cursor) {
                 if (data && data.data) return data;
             }
         } catch (e) {
-            // Try next proxy
+            // essaie le fallback
         }
     }
     return null;
 }
 
-async function scanPool() {
-    const newPool = [];
-    let cursor = '';
-    let totalScanned = 0, total7or8 = 0, pagesScanned = 0;
-    for (let page = 0; page < MAX_PAGES; page++) {
-        const data = await fetchServers(cursor);
+// ═══════════════════════════════════════════════════════════════
+// 🚀 UNE BRANCHE = suit sa propre chaine de cursors
+//    Chaque branche demarre a un cursor different => couvre une
+//    portion differente de la liste des serveurs en parallele
+// ═══════════════════════════════════════════════════════════════
+async function scanBranch(startCursor, maxPages, collector) {
+    let cursor = startCursor;
+    let pages = 0;
+    let scanned = 0;
+    let found = 0;
+    for (let p = 0; p < maxPages; p++) {
+        const data = await fetchServersPage(cursor);
         if (!data || !data.data) break;
-        pagesScanned++;
+        pages++;
         for (const server of data.data) {
-            totalScanned++;
+            scanned++;
             if (server.playing === 7 || server.playing === 8) {
-                total7or8++;
-                if (!blacklist.has(server.id)) {
-                    const s = { jobId: server.id, players: server.playing, maxPlayers: server.maxPlayers };
-                    newPool.push(s);
+                if (!blacklist.has(server.id) && !collector.seen.has(server.id)) {
+                    collector.seen.add(server.id);
+                    collector.servers.push({ jobId: server.id, players: server.playing, maxPlayers: server.maxPlayers });
+                    found++;
                 }
             }
         }
         if (!data.nextPageCursor) break;
         cursor = data.nextPageCursor;
-        await new Promise(r => setTimeout(r, 200));
+        if (PAGE_DELAY > 0) await new Promise(r => setTimeout(r, PAGE_DELAY));
     }
+    return { pages, scanned, found };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 🔥 SCAN PRINCIPAL : lance PARALLEL_BRANCHES branches en parallele
+// ═══════════════════════════════════════════════════════════════
+async function scanPool() {
+    const t0 = Date.now();
+    const collector = { servers: [], seen: new Set() };
+    const pagesPerBranch = Math.ceil(MAX_PAGES / PARALLEL_BRANCHES);
+
+    // 1) Recolte les cursors de depart de chaque branche.
+    //    On avance d'une page a chaque fois pour donner a chaque
+    //    branche un point d'entree different dans la liste.
+    const startCursors = [''];
+    let probeCursor = '';
+    for (let b = 1; b < PARALLEL_BRANCHES; b++) {
+        // saute "pagesPerBranch" pages pour positionner la branche suivante
+        let ok = true;
+        for (let s = 0; s < pagesPerBranch; s++) {
+            const data = await fetchServersPage(probeCursor);
+            if (!data || !data.nextPageCursor) { ok = false; break; }
+            probeCursor = data.nextPageCursor;
+        }
+        if (!ok) break;
+        startCursors.push(probeCursor);
+    }
+
+    // 2) Lance toutes les branches EN PARALLELE
+    const results = await Promise.all(
+        startCursors.map(c => scanBranch(c, pagesPerBranch, collector))
+    );
+
+    const pagesScanned = results.reduce((a, r) => a + r.pages, 0);
+    const totalScanned = results.reduce((a, r) => a + r.scanned, 0);
+    const total7or8 = collector.servers.length;
+
     if (pagesScanned === 0) {
-        console.log('[SCAN] All proxies dead, pool conservé (' + pool.length + ' serveurs)');
+        console.log('[SCAN] Worker + fallback dead, pool conservé (' + pool.length + ' serveurs)');
         return;
     }
-    pool = newPool;
+
+    // 3) Construit / merge la pool
+    if (POOL_MERGE) {
+        // Ajoute les nouveaux serveurs pas encore dans la pool ni blacklistes
+        for (const s of collector.servers) {
+            if (!poolSeen.has(s.jobId) && !blacklist.has(s.jobId)) {
+                poolSeen.add(s.jobId);
+                pool.push(s);
+            }
+        }
+        // Cap memoire : si trop gros, on garde les plus recents
+        if (pool.length > POOL_MAX_SIZE) {
+            const removed = pool.splice(0, pool.length - POOL_MAX_SIZE);
+            removed.forEach(s => poolSeen.delete(s.jobId));
+        }
+    } else {
+        pool = collector.servers;
+        poolSeen.clear();
+        pool.forEach(s => poolSeen.add(s.jobId));
+    }
+
     stats.totalScans++;
-    console.log('[SCAN] Pages: ' + pagesScanned + ' | Total scanned: ' + totalScanned + ' | 7/8 found: ' + total7or8 + ' | Pool (fresh): ' + newPool.length + ' | Blacklisted: ' + blacklist.size);
+    stats.lastScanPages = pagesScanned;
+    stats.lastScanFound = total7or8;
+    stats.lastScanDuration = Date.now() - t0;
+
+    console.log('[SCAN] Branches: ' + startCursors.length + '/' + PARALLEL_BRANCHES +
+        ' | Pages: ' + pagesScanned +
+        ' | Scanned: ' + totalScanned +
+        ' | 7/8 found: ' + total7or8 +
+        ' | Pool: ' + pool.length +
+        ' | Blacklist: ' + blacklist.size +
+        ' | ' + stats.lastScanDuration + 'ms');
 }
 
 async function scanLoop() {
@@ -316,9 +402,14 @@ async function scanLoop() {
 }
 
 app.get('/', (req, res) => res.json({
-    name: 'Godzilla Notifier', version: '8.4 Simplified',
+    name: 'Godzilla Notifier', version: '9.0 Parallel',
     pool: pool.length,
-    config: { scanInterval: SCAN_INTERVAL + 'ms', maxPages: MAX_PAGES, proxies: PROXIES.length }
+    config: {
+        scanInterval: SCAN_INTERVAL + 'ms',
+        maxPages: MAX_PAGES,
+        parallelBranches: PARALLEL_BRANCHES,
+        poolMerge: POOL_MERGE
+    }
 }));
 
 app.get('/health', (req, res) => res.json({ status: 'ok', uptime: Math.floor((Date.now() - stats.startedAt) / 1000), pool: pool.length }));
@@ -333,9 +424,10 @@ app.get('/jobs', (req, res) => {
     const botData = botHistory.get(username);
     botData.lastSeen = Date.now();
     botData.jobsReceived++;
-    const selected = pool[Math.floor(Math.random() * pool.length)];
-    const idx = pool.findIndex(s => s.jobId === selected.jobId);
-    if (idx !== -1) pool.splice(idx, 1);
+    const selectedIdx = Math.floor(Math.random() * pool.length);
+    const selected = pool[selectedIdx];
+    pool.splice(selectedIdx, 1);
+    poolSeen.delete(selected.jobId);
     blacklist.set(selected.jobId, Date.now() + BLACKLIST_TTL);
     botData.currentJobId = selected.jobId;
     stats.jobsServed++;
@@ -392,6 +484,9 @@ app.get('/stats', (req, res) => {
         totalScans: stats.totalScans,
         jobsServed: stats.jobsServed,
         jobsPerMinute: m > 0 ? Math.round(stats.jobsServed / m) : 0,
+        lastScanPages: stats.lastScanPages,
+        lastScanFound: stats.lastScanFound,
+        lastScanDuration: stats.lastScanDuration + 'ms',
         reportsReceived: stats.reportsReceived, 
         reportsWithBrainrots: stats.reportsWithBrainrots,
         reportsHitRate: stats.reportsReceived > 0 ? Math.round((stats.reportsWithBrainrots / stats.reportsReceived) * 100) + '%' : '0%',
@@ -432,29 +527,26 @@ app.delete('/api/bots', (req, res) => {
 });
 
 app.get('/live-monitor', (req, res) => {
-    res.send(`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Godzilla Live Monitor</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Courier New',monospace;background:#000;color:#00ff00;min-height:100vh;padding:20px}.bg{position:fixed;top:0;left:0;width:100%;height:100%;background-image:linear-gradient(rgba(0,255,0,.02) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,0,.02) 1px,transparent 1px);background-size:40px 40px;z-index:-1}.container{max-width:1400px;margin:0 auto}.header{text-align:center;margin-bottom:30px;padding:25px;border:3px solid #00ff00;background:rgba(0,255,0,0.05);box-shadow:0 0 20px rgba(0,255,0,0.2)}.header h1{font-size:52px;text-shadow:0 0 20px #00ff00;letter-spacing:6px;font-weight:900;margin-bottom:10px}.subtitle{font-size:12px;opacity:.7;text-transform:uppercase;letter-spacing:3px}.controls{display:flex;gap:20px;justify-content:center;align-items:center;margin-bottom:30px;flex-wrap:wrap;padding:20px;border:2px solid #00ff00;background:rgba(0,255,0,0.03)}.slider-group{display:flex;align-items:center;gap:15px}.slider-label{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:2px;color:#ffff00}input[type="range"]{width:200px;cursor:pointer}.slider-value{font-size:16px;font-weight:900;color:#ffff00;min-width:60px}.clear-btn{background:#f55;color:#000;border:2px solid #f55;padding:12px 30px;font-size:16px;font-weight:900;cursor:pointer;text-transform:uppercase;letter-spacing:2px;transition:all 0.3s;font-family:'Courier New',monospace}.clear-btn:hover{background:#ff0000;box-shadow:0 0 30px rgba(255,0,0,0.8)}.clear-btn:disabled{background:#888;cursor:not-allowed;opacity:0.5}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:15px;margin-bottom:30px}.stat-box{background:rgba(0,255,0,0.05);border:2px solid #00ff00;padding:20px;text-align:center;box-shadow:0 0 15px rgba(0,255,0,0.2);transition:all 0.3s}.stat-box:hover{transform:translateY(-3px);box-shadow:0 0 25px rgba(0,255,0,0.4)}.stat-label{font-size:11px;opacity:.7;text-transform:uppercase;margin-bottom:10px;letter-spacing:2px}.stat-value{font-size:42px;font-weight:900;color:#ffff00;text-shadow:0 0 10px #ffff00}.stat-sub{font-size:11px;opacity:.6;margin-top:8px}.bots-section{background:#000;border:2px solid #00ff00;padding:25px;box-shadow:0 0 15px rgba(0,255,0,0.2)}.bots-title{font-size:16px;font-weight:900;color:#ffff00;margin-bottom:20px;text-transform:uppercase;letter-spacing:2px}.bots-list{display:grid;gap:20px}.bot-card{background:#000;border:2px solid #00ff00;padding:25px;min-height:140px;position:relative;overflow:hidden;transition:all 0.3s}.bot-card:hover{box-shadow:0 0 20px rgba(0,255,0,0.4)}.bot-name{font-size:32px;font-weight:900;color:#fff;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px}.bot-stats{display:flex;gap:20px;font-size:13px;margin-bottom:12px}.bot-stat{opacity:.7}.bot-status{font-size:16px;font-weight:900}.status-active{color:#00ff00}.status-slow{color:#fa0}.status-idle{color:#f55}.timer-bar{position:absolute;bottom:0;left:0;height:8px;background:#00ff00;transition:all 0.3s}.footer{text-align:center;padding:20px;opacity:.4;font-size:11px;border-top:1px solid #00ff00;text-transform:uppercase;margin-top:40px}</style></head><body><div class="bg"></div><div class="container"><div class="header"><h1>🔥 GODZILLA LIVE MONITOR 🔥</h1><div class="subtitle">v8.4 Simplified — Real-time Bot Status</div></div><div class="controls"><div class="slider-group"><span class="slider-label">📏 Bot Line Size:</span><input type="range" id="sizeSlider" min="1" max="2.5" step="0.1" value="1"/><span class="slider-value" id="sizeValue">1.0x</span></div><button class="clear-btn" id="clearBtn" onclick="clearAllBots()">❌ CLEAR ALL BOTS</button></div><div class="grid"><div class="stat-box"><div class="stat-label">Server Pool</div><div class="stat-value" id="stat-pool">0</div><div class="stat-sub" id="stat-scans">0 scans</div></div><div class="stat-box"><div class="stat-label">Jobs/Minute</div><div class="stat-value" id="stat-jobsmin">0</div><div class="stat-sub" id="stat-jobstotal">0 served</div></div><div class="stat-box"><div class="stat-label">Hit Rate</div><div class="stat-value" id="stat-hitrate">0%</div><div class="stat-sub" id="stat-reports">0 reports</div></div><div class="stat-box"><div class="stat-label">Active Bots</div><div class="stat-value" id="stat-active">0/0</div><div class="stat-sub" id="stat-uptime">uptime</div></div><div class="stat-box"><div class="stat-label">Blacklisted</div><div class="stat-value" id="stat-quality">0</div><div class="stat-sub">10min TTL</div></div><div class="stat-box"><div class="stat-label">Live Brainrots</div><div class="stat-value" id="stat-brainrots">0</div><div class="stat-sub">TTL 30s</div></div></div><div class="bots-section"><div class="bots-title">📊 Bots Detail</div><div class="bots-list" id="bots-list"><div style="text-align:center;opacity:0.5;padding:40px">No bots yet...</div></div></div><div class="footer">Dev by SALAH | Godzilla v8.4 | Auto-refresh 2s | /dashboard | /stats</div></div><script>let sizeMultiplier=1;document.getElementById('sizeSlider').addEventListener('change',(e)=>{sizeMultiplier=parseFloat(e.target.value);document.getElementById('sizeValue').textContent=sizeMultiplier.toFixed(1)+'x';updateBotDisplay();});async function clearAllBots(){const btn=document.getElementById('clearBtn');btn.disabled=true;btn.textContent='⏳ CLEARING...';try{const response=await fetch('/api/bots',{method:'DELETE',headers:{'Content-Type':'application/json','x-api-key':'SALAH2026'}});if(!response.ok){const error=await response.json();alert('Error: '+(error.error||'Unknown error'));btn.textContent='❌ CLEAR ALL BOTS';btn.disabled=false;return;}const result=await response.json();const botsList=document.getElementById('bots-list');botsList.innerHTML='<div style="text-align:center;opacity:0.5;padding:40px">No bots yet...</div>';const stats=await fetch("/stats").then(r=>r.json());const uptime=Math.floor(stats.uptime/60);document.getElementById('stat-active').textContent='0/'+result.deleted;document.getElementById('stat-uptime').textContent=uptime+'min uptime';btn.textContent='✅ CLEARED '+result.deleted+' BOTS';setTimeout(()=>{btn.textContent='❌ CLEAR ALL BOTS';btn.disabled=false;},3000);}catch(e){console.error('Clear failed:',e);alert('Failed to clear: '+e.message);btn.textContent='❌ CLEAR ALL BOTS';btn.disabled=false;}}async function updateMonitor(){try{const [stats,bots]=await Promise.all([fetch("/stats").then(r=>r.json()),fetch("/bots").then(r=>r.json())]);const uptime=Math.floor(stats.uptime/60);const activeBots=bots.filter(b=>b.secondsSinceLastSeen<30).length;document.getElementById('stat-pool').textContent=stats.pool;document.getElementById('stat-scans').textContent=stats.totalScans+' scans';document.getElementById('stat-jobsmin').textContent=stats.jobsPerMinute;document.getElementById('stat-jobstotal').textContent=stats.jobsServed+' served';document.getElementById('stat-hitrate').textContent=stats.reportsHitRate;document.getElementById('stat-reports').textContent=stats.reportsReceived+' reports';document.getElementById('stat-active').textContent=activeBots+'/'+bots.length;document.getElementById('stat-uptime').textContent=uptime+'min uptime';document.getElementById('stat-quality').textContent=stats.blacklistedServers;document.getElementById('stat-brainrots').textContent=stats.recentBrainrots;updateBotDisplay();}catch(e){console.error('Update error:',e);}}async function updateBotDisplay(){try{const bots=await fetch("/bots").then(r=>r.json());const list=document.getElementById('bots-list');if(bots.length===0){list.innerHTML='<div style="text-align:center;opacity:0.5;padding:40px">No bots yet...</div>';return;}list.innerHTML=bots.map(bot=>{const secondsSince=bot.secondsSinceLastSeen;let statusClass='status-idle';let statusText='❌ IDLE';let statusColor='#f55';if(secondsSince<60){statusClass='status-active';statusText='✅ ACTIVE';statusColor='#00ff00';}else if(secondsSince<100){statusClass='status-slow';statusText='⚠️ SLOW';statusColor='#fa0';}const baseHeight=140;const scaledHeight=baseHeight*sizeMultiplier;const progressWidth=Math.max(0,Math.min(100,(secondsSince/120)*100));return '<div class="bot-card" style="min-height:'+scaledHeight+'px;border-color:'+statusColor+';"><div class="bot-name" style="font-size:'+(32*sizeMultiplier)+'px;">'+bot.name+'</div><div class="bot-stats" style="font-size:'+(13*sizeMultiplier)+'px;"><div class="bot-stat">Jobs: '+bot.jobsReceived+'</div><div class="bot-stat">Seen: '+secondsSince+'s ago</div><div class="bot-stat bot-status '+statusClass+'">'+statusText+'</div></div><div class="timer-bar" style="background:'+statusColor+';width:'+progressWidth+'%;"></div></div>';}).join('');}catch(e){console.error('Display error:',e);}}updateMonitor();setInterval(updateMonitor,2000);</script></body></html>`);
+    res.send(`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Godzilla Live Monitor</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Courier New',monospace;background:#000;color:#00ff00;min-height:100vh;padding:20px}.bg{position:fixed;top:0;left:0;width:100%;height:100%;background-image:linear-gradient(rgba(0,255,0,.02) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,0,.02) 1px,transparent 1px);background-size:40px 40px;z-index:-1}.container{max-width:1400px;margin:0 auto}.header{text-align:center;margin-bottom:30px;padding:25px;border:3px solid #00ff00;background:rgba(0,255,0,0.05);box-shadow:0 0 20px rgba(0,255,0,0.2)}.header h1{font-size:52px;text-shadow:0 0 20px #00ff00;letter-spacing:6px;font-weight:900;margin-bottom:10px}.subtitle{font-size:12px;opacity:.7;text-transform:uppercase;letter-spacing:3px}.controls{display:flex;gap:20px;justify-content:center;align-items:center;margin-bottom:30px;flex-wrap:wrap;padding:20px;border:2px solid #00ff00;background:rgba(0,255,0,0.03)}.slider-group{display:flex;align-items:center;gap:15px}.slider-label{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:2px;color:#ffff00}input[type="range"]{width:200px;cursor:pointer}.slider-value{font-size:16px;font-weight:900;color:#ffff00;min-width:60px}.clear-btn{background:#f55;color:#000;border:2px solid #f55;padding:12px 30px;font-size:16px;font-weight:900;cursor:pointer;text-transform:uppercase;letter-spacing:2px;transition:all 0.3s;font-family:'Courier New',monospace}.clear-btn:hover{background:#ff0000;box-shadow:0 0 30px rgba(255,0,0,0.8)}.clear-btn:disabled{background:#888;cursor:not-allowed;opacity:0.5}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:15px;margin-bottom:30px}.stat-box{background:rgba(0,255,0,0.05);border:2px solid #00ff00;padding:20px;text-align:center;box-shadow:0 0 15px rgba(0,255,0,0.2);transition:all 0.3s}.stat-box:hover{transform:translateY(-3px);box-shadow:0 0 25px rgba(0,255,0,0.4)}.stat-label{font-size:11px;opacity:.7;text-transform:uppercase;margin-bottom:10px;letter-spacing:2px}.stat-value{font-size:42px;font-weight:900;color:#ffff00;text-shadow:0 0 10px #ffff00}.stat-sub{font-size:11px;opacity:.6;margin-top:8px}.bots-section{background:#000;border:2px solid #00ff00;padding:25px;box-shadow:0 0 15px rgba(0,255,0,0.2)}.bots-title{font-size:16px;font-weight:900;color:#ffff00;margin-bottom:20px;text-transform:uppercase;letter-spacing:2px}.bots-list{display:grid;gap:20px}.bot-card{background:#000;border:2px solid #00ff00;padding:25px;min-height:140px;position:relative;overflow:hidden;transition:all 0.3s}.bot-card:hover{box-shadow:0 0 20px rgba(0,255,0,0.4)}.bot-name{font-size:32px;font-weight:900;color:#fff;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px}.bot-stats{display:flex;gap:20px;font-size:13px;margin-bottom:12px}.bot-stat{opacity:.7}.bot-status{font-size:16px;font-weight:900}.status-active{color:#00ff00}.status-slow{color:#fa0}.status-idle{color:#f55}.timer-bar{position:absolute;bottom:0;left:0;height:8px;background:#00ff00;transition:all 0.3s}.footer{text-align:center;padding:20px;opacity:.4;font-size:11px;border-top:1px solid #00ff00;text-transform:uppercase;margin-top:40px}</style></head><body><div class="bg"></div><div class="container"><div class="header"><h1>🔥 GODZILLA LIVE MONITOR 🔥</h1><div class="subtitle">v9.0 Parallel — Real-time Bot Status</div></div><div class="controls"><div class="slider-group"><span class="slider-label">📏 Bot Line Size:</span><input type="range" id="sizeSlider" min="1" max="2.5" step="0.1" value="1"/><span class="slider-value" id="sizeValue">1.0x</span></div><button class="clear-btn" id="clearBtn" onclick="clearAllBots()">❌ CLEAR ALL BOTS</button></div><div class="grid"><div class="stat-box"><div class="stat-label">Server Pool</div><div class="stat-value" id="stat-pool">0</div><div class="stat-sub" id="stat-scans">0 scans</div></div><div class="stat-box"><div class="stat-label">Jobs/Minute</div><div class="stat-value" id="stat-jobsmin">0</div><div class="stat-sub" id="stat-jobstotal">0 served</div></div><div class="stat-box"><div class="stat-label">Hit Rate</div><div class="stat-value" id="stat-hitrate">0%</div><div class="stat-sub" id="stat-reports">0 reports</div></div><div class="stat-box"><div class="stat-label">Active Bots</div><div class="stat-value" id="stat-active">0/0</div><div class="stat-sub" id="stat-uptime">uptime</div></div><div class="stat-box"><div class="stat-label">Blacklisted</div><div class="stat-value" id="stat-quality">0</div><div class="stat-sub">10min TTL</div></div><div class="stat-box"><div class="stat-label">Live Brainrots</div><div class="stat-value" id="stat-brainrots">0</div><div class="stat-sub">TTL 30s</div></div></div><div class="bots-section"><div class="bots-title">📊 Bots Detail</div><div class="bots-list" id="bots-list"><div style="text-align:center;opacity:0.5;padding:40px">No bots yet...</div></div></div><div class="footer">Dev by SALAH | Godzilla v9.0 | Auto-refresh 2s | /dashboard | /stats</div></div><script>let sizeMultiplier=1;document.getElementById('sizeSlider').addEventListener('change',(e)=>{sizeMultiplier=parseFloat(e.target.value);document.getElementById('sizeValue').textContent=sizeMultiplier.toFixed(1)+'x';updateBotDisplay();});async function clearAllBots(){const btn=document.getElementById('clearBtn');btn.disabled=true;btn.textContent='⏳ CLEARING...';try{const response=await fetch('/api/bots',{method:'DELETE',headers:{'Content-Type':'application/json','x-api-key':'SALAH2026'}});if(!response.ok){const error=await response.json();alert('Error: '+(error.error||'Unknown error'));btn.textContent='❌ CLEAR ALL BOTS';btn.disabled=false;return;}const result=await response.json();const botsList=document.getElementById('bots-list');botsList.innerHTML='<div style="text-align:center;opacity:0.5;padding:40px">No bots yet...</div>';const stats=await fetch("/stats").then(r=>r.json());const uptime=Math.floor(stats.uptime/60);document.getElementById('stat-active').textContent='0/'+result.deleted;document.getElementById('stat-uptime').textContent=uptime+'min uptime';btn.textContent='✅ CLEARED '+result.deleted+' BOTS';setTimeout(()=>{btn.textContent='❌ CLEAR ALL BOTS';btn.disabled=false;},3000);}catch(e){console.error('Clear failed:',e);alert('Failed to clear: '+e.message);btn.textContent='❌ CLEAR ALL BOTS';btn.disabled=false;}}async function updateMonitor(){try{const [stats,bots]=await Promise.all([fetch("/stats").then(r=>r.json()),fetch("/bots").then(r=>r.json())]);const uptime=Math.floor(stats.uptime/60);const activeBots=bots.filter(b=>b.secondsSinceLastSeen<30).length;document.getElementById('stat-pool').textContent=stats.pool;document.getElementById('stat-scans').textContent=stats.totalScans+' scans';document.getElementById('stat-jobsmin').textContent=stats.jobsPerMinute;document.getElementById('stat-jobstotal').textContent=stats.jobsServed+' served';document.getElementById('stat-hitrate').textContent=stats.reportsHitRate;document.getElementById('stat-reports').textContent=stats.reportsReceived+' reports';document.getElementById('stat-active').textContent=activeBots+'/'+bots.length;document.getElementById('stat-uptime').textContent=uptime+'min uptime';document.getElementById('stat-quality').textContent=stats.blacklistedServers;document.getElementById('stat-brainrots').textContent=stats.recentBrainrots;updateBotDisplay();}catch(e){console.error('Update error:',e);}}async function updateBotDisplay(){try{const bots=await fetch("/bots").then(r=>r.json());const list=document.getElementById('bots-list');if(bots.length===0){list.innerHTML='<div style="text-align:center;opacity:0.5;padding:40px">No bots yet...</div>';return;}list.innerHTML=bots.map(bot=>{const secondsSince=bot.secondsSinceLastSeen;let statusClass='status-idle';let statusText='❌ IDLE';let statusColor='#f55';if(secondsSince<60){statusClass='status-active';statusText='✅ ACTIVE';statusColor='#00ff00';}else if(secondsSince<100){statusClass='status-slow';statusText='⚠️ SLOW';statusColor='#fa0';}const baseHeight=140;const scaledHeight=baseHeight*sizeMultiplier;const progressWidth=Math.max(0,Math.min(100,(secondsSince/120)*100));return '<div class="bot-card" style="min-height:'+scaledHeight+'px;border-color:'+statusColor+';"><div class="bot-name" style="font-size:'+(32*sizeMultiplier)+'px;">'+bot.name+'</div><div class="bot-stats" style="font-size:'+(13*sizeMultiplier)+'px;"><div class="bot-stat">Jobs: '+bot.jobsReceived+'</div><div class="bot-stat">Seen: '+secondsSince+'s ago</div><div class="bot-stat bot-status '+statusClass+'">'+statusText+'</div></div><div class="timer-bar" style="background:'+statusColor+';width:'+progressWidth+'%;"></div></div>';}).join('');}catch(e){console.error('Display error:',e);}}updateMonitor();setInterval(updateMonitor,2000);</script></body></html>`);
 });
 
 app.get('/dashboard', (req, res) => {
-    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Godzilla Dashboard</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Courier New',monospace;background:#000;color:#00ff00;padding:20px}.bg{position:fixed;top:0;left:0;width:100%;height:100%;background-image:linear-gradient(rgba(0,255,0,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,0,.03) 1px,transparent 1px);background-size:50px 50px;z-index:-1}.container{max-width:1200px;margin:0 auto}.header{text-align:center;margin-bottom:40px;padding:30px;border:3px solid #00ff00}.header h1{font-size:48px;text-shadow:0 0 20px #00ff00;letter-spacing:8px;font-weight:900}.empty{text-align:center;padding:100px 20px;font-size:20px;border:3px dashed #00ff00;opacity:.3}.list{display:grid;gap:20px}.card{background:#000;border:3px solid #00ff00;padding:25px;position:relative}.top-card{border-color:#ffd700}.name{font-size:24px;font-weight:900;color:#fff}.val{font-size:40px;font-weight:900;color:#00ff00}.badge{display:inline-block;padding:5px 10px;background:#00ff00;color:#000;font-size:11px;font-weight:900;margin-right:5px}.timer{border:2px solid #00ff00;padding:7px 14px;font-size:17px;font-weight:900}.prog{position:absolute;bottom:0;left:0;height:5px;background:#00ff00}.footer{text-align:center;margin-top:40px;padding:20px;opacity:.4;font-size:12px;border-top:1px solid #00ff00}</style></head><body><div class="bg"></div><div class="container"><div class="header"><h1>GODZILLA NOTIFIER</h1><div>v8.4 Simplified</div></div><div id="app"><div class="empty">EN ATTENTE DE BRAINROTS...</div></div><div class="footer">Dev by SALAH | Discord Alerts Enabled | /live-monitor | /stats</div></div><script>function fmt(n){if(!n)return"$0/s";const a=Math.abs(n);if(a>=1e12)return"$"+(n/1e12).toFixed(1).replace(/\.0$/,"")+"T/s";if(a>=1e9)return"$"+(n/1e9).toFixed(1).replace(/\.0$/,"")+"B/s";if(a>=1e6)return"$"+(n/1e6).toFixed(1).replace(/\.0$/,"")+"M/s";if(a>=1e3)return"$"+(n/1e3).toFixed(1).replace(/\.0$/,"")+"K/s";return"$"+Math.round(n)+"/s";}function render(b){const c=document.getElementById("app");if(!b||!b.length){c.innerHTML='<div class="empty">EN ATTENTE DE BRAINROTS...</div>';return;}b.sort((x,y)=>y.numeric-x.numeric);const l=document.createElement("div");l.className="list";b.forEach((x,i)=>{const r=x.remainingSeconds||0;const d=document.createElement("div");d.className="card"+(i===0?" top-card":"");d.innerHTML='<div style="display:flex;justify-content:space-between"><div><span class="badge">'+x.players+'/8</span><div class="name">'+x.name+'</div></div><div class="val">'+fmt(x.numeric)+'</div></div><div style="font-size:12px;opacity:.6">BOT: '+x.botName+'</div><div class="prog" style="width:'+(r/30*100)+'%"></div>';l.appendChild(d);});c.innerHTML="";c.appendChild(l);}fetch("/api/brainrots").then(r=>r.json()).then(render);setInterval(()=>fetch("/api/brainrots").then(r=>r.json()).then(render),1000);</script></body></html>`);
+    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Godzilla Dashboard</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Courier New',monospace;background:#000;color:#00ff00;padding:20px}.bg{position:fixed;top:0;left:0;width:100%;height:100%;background-image:linear-gradient(rgba(0,255,0,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,0,.03) 1px,transparent 1px);background-size:50px 50px;z-index:-1}.container{max-width:1200px;margin:0 auto}.header{text-align:center;margin-bottom:40px;padding:30px;border:3px solid #00ff00}.header h1{font-size:48px;text-shadow:0 0 20px #00ff00;letter-spacing:8px;font-weight:900}.empty{text-align:center;padding:100px 20px;font-size:20px;border:3px dashed #00ff00;opacity:.3}.list{display:grid;gap:20px}.card{background:#000;border:3px solid #00ff00;padding:25px;position:relative}.top-card{border-color:#ffd700}.name{font-size:24px;font-weight:900;color:#fff}.val{font-size:40px;font-weight:900;color:#00ff00}.badge{display:inline-block;padding:5px 10px;background:#00ff00;color:#000;font-size:11px;font-weight:900;margin-right:5px}.timer{border:2px solid #00ff00;padding:7px 14px;font-size:17px;font-weight:900}.prog{position:absolute;bottom:0;left:0;height:5px;background:#00ff00}.footer{text-align:center;margin-top:40px;padding:20px;opacity:.4;font-size:12px;border-top:1px solid #00ff00}</style></head><body><div class="bg"></div><div class="container"><div class="header"><h1>GODZILLA NOTIFIER</h1><div>v9.0 Parallel</div></div><div id="app"><div class="empty">EN ATTENTE DE BRAINROTS...</div></div><div class="footer">Dev by SALAH | Discord Alerts Enabled | /live-monitor | /stats</div></div><script>function fmt(n){if(!n)return"$0/s";const a=Math.abs(n);if(a>=1e12)return"$"+(n/1e12).toFixed(1).replace(/\.0$/,"")+"T/s";if(a>=1e9)return"$"+(n/1e9).toFixed(1).replace(/\.0$/,"")+"B/s";if(a>=1e6)return"$"+(n/1e6).toFixed(1).replace(/\.0$/,"")+"M/s";if(a>=1e3)return"$"+(n/1e3).toFixed(1).replace(/\.0$/,"")+"K/s";return"$"+Math.round(n)+"/s";}function render(b){const c=document.getElementById("app");if(!b||!b.length){c.innerHTML='<div class="empty">EN ATTENTE DE BRAINROTS...</div>';return;}b.sort((x,y)=>y.numeric-x.numeric);const l=document.createElement("div");l.className="list";b.forEach((x,i)=>{const r=x.remainingSeconds||0;const d=document.createElement("div");d.className="card"+(i===0?" top-card":"");d.innerHTML='<div style="display:flex;justify-content:space-between"><div><span class="badge">'+x.players+'/8</span><div class="name">'+x.name+'</div></div><div class="val">'+fmt(x.numeric)+'</div></div><div style="font-size:12px;opacity:.6">BOT: '+x.botName+'</div><div class="prog" style="width:'+(r/30*100)+'%"></div>';l.appendChild(d);});c.innerHTML="";c.appendChild(l);}fetch("/api/brainrots").then(r=>r.json()).then(render);setInterval(()=>fetch("/api/brainrots").then(r=>r.json()).then(render),1000);</script></body></html>`);
 });
 
 app.listen(PORT, () => {
     console.log('================================================');
-    console.log('GODZILLA NOTIFIER v8.4 SIMPLIFIED - 7/8 ONLY');
+    console.log('GODZILLA NOTIFIER v9.0 PARALLEL SCAN - 7/8 ONLY');
     console.log('PlaceId: ' + PLACE_ID);
-    console.log('Scan: toutes les ' + (SCAN_INTERVAL/1000) + 's | Pages: ' + MAX_PAGES);
+    console.log('Scan cycle pause: ' + (SCAN_INTERVAL/1000) + 's');
+    console.log('Max pages: ' + MAX_PAGES + ' | Parallel branches: ' + PARALLEL_BRANCHES);
+    console.log('Pages/branche: ~' + Math.ceil(MAX_PAGES / PARALLEL_BRANCHES));
+    console.log('Pool merge (accumulation): ' + POOL_MERGE + ' | Max pool: ' + POOL_MAX_SIZE);
     console.log('Filter: ONLY 7 ou 8 players');
     console.log('Blacklist: ' + (BLACKLIST_TTL/60000) + ' minutes');
-    console.log('Proxies cascade:');
-    PROXIES.forEach(p => console.log('  - ' + p));
-    console.log('Discord Configuration:');
-    console.log('  - Webhook 100M+: ' + DISCORD_WEBHOOK_HIGH.substring(0, 60) + '...');
-    console.log('  - Webhook < 100M: ' + DISCORD_WEBHOOK_LOW.substring(0, 60) + '...');
-    console.log('  - Batch Size: ' + DISCORD_BATCH_SIZE + ' alerts max');
-    console.log('  - Batch Interval: ' + (DISCORD_BATCH_INTERVAL/1000) + 's');
-    console.log('  - Anti-spam: ' + ANTI_SPAM_DELAY + 'ms delay');
-    console.log('Log Batching: ' + LOG_BATCH_SIZE + ' max per ' + (LOG_BATCH_INTERVAL/1000) + 's');
+    console.log('Proxy: ' + PROXY);
+    console.log('Fallback: ' + PROXY_FALLBACK);
+    console.log('Discord Batch: ' + DISCORD_BATCH_SIZE + ' / ' + (DISCORD_BATCH_INTERVAL/1000) + 's | Anti-spam: ' + ANTI_SPAM_DELAY + 'ms');
     console.log('PORT: ' + PORT);
     console.log('================================================');
     scanLoop();
