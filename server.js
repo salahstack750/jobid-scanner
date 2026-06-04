@@ -82,7 +82,6 @@ const IMAGE_CACHE = new Map();
 const IMAGE_CACHE_TTL = 3600000;
 
 const PROXIES = [
-    'https://calm-glade-1ffa.jedab27255.workers.dev',
     'https://roblox-proxy.salahelarabi03.workers.dev',
     'https://games.roproxy.com',
     'https://games.roblox.com'
