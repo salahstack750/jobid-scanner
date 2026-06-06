@@ -19,7 +19,7 @@ const PLACE_ID = 109983668079237;
 // 🔥 CONFIG SIMPLE
 // ═══════════════════════════════════════════════════════════════
 const SCAN_INTERVAL = 10000;         // Scan toutes les 10 secondes
-const MAX_PAGES = 15;                // 15 pages x 100 = ~1500 serveurs scannes
+const MAX_PAGES = 200;                // 15 pages x 100 = ~1500 serveurs scannes
 const BRAINROT_TTL = 30 * 1000;
 const MIN_BRAINROT_VALUE = 1000000;
 const MAX_LOGS = 200;
